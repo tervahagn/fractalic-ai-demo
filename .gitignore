@@ -172,3 +172,6 @@ cython_debug/
 .DS_Store
 mcp_servers.json
 DBG_TOOLS.json
+*.pyc
+.idea/
+.vscode/
