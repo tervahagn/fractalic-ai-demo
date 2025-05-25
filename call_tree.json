@@ -1,0 +1,14 @@
+{
+    "operation": "@run",
+    "operation_src": [
+        null
+    ],
+    "filename": "test_tools_all.md",
+    "ctx_file": "test_tools_all.ctx",
+    "md_commit_hash": "d112ba4b9a3d9fb2a820354177e0e0d917651d77",
+    "ctx_commit_hash": "ea4b8fb1d86d66f825922248ddc87d89edfa84e7",
+    "trc_file": "test_tools_all.trc",
+    "trc_commit_hash": "ea4b8fb1d86d66f825922248ddc87d89edfa84e7",
+    "children": [],
+    "node_python": "<core.operations.call_tree.CallTreeNode object at 0x10628a650>"
+}
