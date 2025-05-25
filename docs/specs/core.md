@@ -151,6 +151,7 @@ Here's a detailed look at each standard Fractalic operation:
     | `run-once`    | No       | Boolean                 | If `true`, this specific `@llm` call will only happen the first time Fractalic encounters it *during a single workflow execution pass*.    | `false`  |
     | `stop-sequences` | No | List[String] | List of strings where the model should stop generation (for Anthropic models it maps to `stop_sequences` parameter). | - |
     | `tools` | No | String/Array | Specify which tools to use: 'none' for no tools (default), 'all' for all tools, or an array of specific tool names. When set to 'none', streaming mode is automatically enabled. | "none" |
+    | `tools-turns-max` | No | Integer | Maximum number of tool calls allowed for this @llm operation. If set, overrides the default or global tool call limit for this operation only. | - |
 *   **Constraint:** You must provide *at least one* of `prompt` or `block`.
 *   **Example:**
     ```yaml
@@ -208,6 +209,7 @@ Here's a detailed look at each standard Fractalic operation:
         *   If only `prompt` is provided: Retrieves content of *all blocks preceding the `@run` operation* in the current AST as context, followed by the literal `prompt` text.
         *   If only `block` is provided: Uses only the content of the specified block(s) as context.
         *   If both are provided: Uses the content of the specified `block`(s) as context, followed by the literal `prompt` text.
+        *   If no input context was assembled (e.g., `block` refers to a non-existent block, or `prompt` is empty), the sub-workflow still executes, but with an empty initial context.
         *   If any input context was assembled, *and* `use-header` was provided (and isn't `"none"`), prepends the specified header to the input content.
     3.  **Create Sub-Workflow Context:** Initializes a new, isolated execution environment for the sub-workflow.
     4.  **Execute Sub-Workflow:** Starts the standard Fractalic execution process (Parse -> Execute Loop -> Terminate) on the target `file`.

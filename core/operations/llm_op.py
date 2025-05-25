@@ -86,6 +86,11 @@ def process_llm(ast: AST, current_node: Node) -> Optional[Node]:
     if stop_seqs:
         params['stop_sequences'] = stop_seqs
 
+    # Get tools-turns-max parameter and pass to LLM client if present
+    tools_turns_max = params.get('tools-turns-max')
+    if tools_turns_max is not None:
+        params['tools-turns-max'] = tools_turns_max
+
     # Validate at least one of prompt/block is provided
     if not prompt and not block_params:
         raise ValueError("@llm operation requires either 'prompt' or 'block' parameter")

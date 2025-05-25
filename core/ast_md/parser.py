@@ -123,6 +123,9 @@ operations:
               type: string
         default: "none"
         description: "Specify which tools to use: 'none' for no tools (default), 'all' for all tools, or an array of specific tool names"
+      tools-turns-max:
+        type: integer
+        description: "Maximum number of tool calls allowed for this @llm operation. If set, overrides the default or global tool call limit for this operation only."
     anyOf:
       - required: ["prompt"]
       - required: ["block"]
@@ -768,7 +771,7 @@ def remove_nodes_by_keys(parser: Parser, keys: list[str]) -> None:
     for key in keys:
         del parser.nodes[key]
 
-def connect_nodes(preceding_node: Optional[Node], new_head: Node, new_tail: Node, following_node: Optional[Node]) -> None:
+def connect_nodes(preceding_node: 'Optional[Node]', new_head: 'Node', new_tail: 'Node', following_node: 'Optional[Node]') -> None:
     if preceding_node:
         preceding_node.next = new_head
         new_head.prev = preceding_node
@@ -776,7 +779,7 @@ def connect_nodes(preceding_node: Optional[Node], new_head: Node, new_tail: Node
         new_tail.next = following_node
         following_node.prev = new_tail
 
-def get_head(ast_or_nodes: Union[AST, Dict[str, Node]]) -> Optional[Node]:
+def get_head(ast_or_nodes: 'Union[AST, Dict[str, Node]]') -> 'Optional[Node]':
     if isinstance(ast_or_nodes, AST):
         return ast_or_nodes.parser.head
     elif isinstance(ast_or_nodes, dict):
@@ -784,7 +787,7 @@ def get_head(ast_or_nodes: Union[AST, Dict[str, Node]]) -> Optional[Node]:
     else:
         raise TypeError("Expected AST or dict of nodes")
 
-def get_tail(ast_or_nodes: Union[AST, Dict[str, Node]]) -> Optional[Node]:
+def get_tail(ast_or_nodes: 'Union[AST, Dict[str, Node]]') -> 'Optional[Node]':
     if isinstance(ast_or_nodes, AST):
         return ast_or_nodes.parser.tail
     elif isinstance(ast_or_nodes, dict):
