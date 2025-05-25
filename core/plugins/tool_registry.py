@@ -108,7 +108,47 @@ class ToolRegistry(dict):
                     manifest["entry"] = str(src)
                     manifest["command"] = cmd_type
                     manifest["_auto"] = True
-                    self._register(manifest, runner_override=runner)
+                    
+                    # Create a specific runner for this tool that includes the tool name as first argument
+                    tool_name = manifest["name"]
+                    exec_prefix = [sys.executable, str(src)] if cmd_type == "python-cli" else [str(src)]
+                    
+                    def make_tool_runner(name, prefix):
+                        def run_tool(**kw):
+                            argv = prefix[:] + [name]  # Add the tool name as the first argument
+                            for k, v in kw.items():
+                                flag = f"--{k.replace('_','-')}"
+                                if isinstance(v, bool):
+                                    if v:
+                                        argv.append(flag)
+                                else:
+                                    argv += [flag, str(v)]
+
+                            # inject settings.toml environment if present
+                            env = None
+                            if Config.TOML_SETTINGS and 'environment' in Config.TOML_SETTINGS:
+                                env = os.environ.copy()
+                                for item in Config.TOML_SETTINGS['environment']:
+                                    if 'key' in item and 'value' in item:
+                                        env[item['key']] = item['value']
+
+                            out = subprocess.run(
+                                argv,
+                                capture_output=True,
+                                text=True,
+                                env=env
+                            )
+                            if out.returncode != 0:
+                                raise RuntimeError(out.stderr.strip() or out.stdout.strip())
+                            try:
+                                return json.loads(out.stdout)
+                            except json.JSONDecodeError:
+                                # For fractalic tools, return raw stdout instead of wrapping in JSON
+                                return out.stdout.strip()
+                        return run_tool
+                    
+                    tool_runner = make_tool_runner(tool_name, exec_prefix)
+                    self._register(manifest, runner_override=tool_runner)
                 # If multi-tool, do NOT register the script stem as a tool
                 continue
             # Single-tool fallback
