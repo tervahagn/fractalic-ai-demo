@@ -185,6 +185,37 @@ print(requests.get(url, timeout=5).text)
 
 ---
 
+## 8.  Common Pitfalls & Best Practices for Auto-Discoverable Tools
+
+### Problems Encountered
+
+1. **Server hangs or slow autodiscovery**: Caused by heavy imports or blocking code at the top level, or not handling introspection flags (`--help`, `--fractalic-dump-schema`, etc.) early.
+2. **Wrong working directory**: Tools created SQLite DBs or config files in the wrong place when run from a parent directory.
+3. **Mixed output (logs + JSON)**: Tools printed both debug/info and JSON result to stdout, causing double-encoded JSON or messy output.
+4. **Argument style mismatch**: Tools failed when called with a positional function name instead of a flag (e.g., `telegram_get_chats` vs `--function get_chats`).
+
+### Best-Practice Recommendations
+
+- **Fast introspection**: Move heavy imports inside functions/classes. At the top of your script, check for introspection flags and exit quickly if present.
+- **Set working directory**: At the top of your script, add:
+  ```python
+  import os, sys
+  os.chdir(os.path.dirname(os.path.abspath(__file__)))
+  ```
+- **Clean output**: Only print the final JSON result to stdout. All debug/info/log messages should go to stderr (e.g., `print("info", file=sys.stderr)`) or use the `logging` module.
+- **CLI compatibility**: Support both positional and flag-based invocation styles:
+  ```python
+  TOOL_NAME_MAP = {"telegram_get_chats": "get_chats", ...}
+  if len(sys.argv) > 1 and sys.argv[1] in TOOL_NAME_MAP:
+      sys.argv = [sys.argv[0], "--function", TOOL_NAME_MAP[sys.argv[1]]] + sys.argv[2:]
+  ```
+- **Schema dump support**: Implement `--fractalic-dump-schema` and `--fractalic-dump-multi-schema` for fast, structured introspection.
+- **Error handling**: Return errors as structured JSON, not as plain text.
+
+> Following these practices ensures your tool is robust, fast, and fully compatible with Fractalic’s auto-discovery and LLM workflows.
+
+---
+
 ## TL;DR for tool authors
 
 > 1. Write a script that **prints helpful `--help` text**, **returns JSON on stdout**, and **implements `get_tool_schema()` with `--fractalic-dump-schema` support**.

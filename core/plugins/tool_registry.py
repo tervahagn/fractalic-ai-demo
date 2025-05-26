@@ -242,7 +242,11 @@ class ToolRegistry(dict):
                   explicit=False, runner_override: Callable | None = None,
                   from_mcp=False):
         name = meta["name"]
-        print(f"[ToolRegistry] Registering tool: {name} with manifest: {meta}")
+        # Only print a summary list of tool names after all registration is done
+        if not hasattr(self, '_tool_names'):  # Track tool names for summary
+            self._tool_names = []
+        self._tool_names.append(name)
+
         if name in self:
             if explicit and self[name].__dict__.get("_auto"):
                 pass
@@ -359,3 +363,8 @@ class ToolRegistry(dict):
 
         self[name] = runner
         self._manifests.append(meta)
+
+        # At the end of rescan, print summary if this is the last tool
+        if hasattr(self, '_tool_names') and len(self._tool_names) == len(self._manifests):
+            print(f"[ToolRegistry] Discovered tools: {', '.join(self._tool_names)}")
+            del self._tool_names

@@ -119,49 +119,64 @@ def sniff(path: Path, kind: str):
     if kind == "python-cli":
         # 1) Try multi-schema dump
         try:
+            print(f"[CLI Introspect] Trying multi-schema dump for {path}")
             res = subprocess.run(
                 [sys.executable, str(path), "--fractalic-dump-multi-schema"],
-                capture_output=True, text=True, timeout=3, check=False
+                capture_output=True, text=True, timeout=10, check=False
             )
+            print(f"[CLI Introspect] Multi-schema dump result: rc={res.returncode}, stdout_len={len(res.stdout)}, stderr={res.stderr[:100]}")
             if res.returncode == 0 and res.stdout:
                 try:
                     parsed = json.loads(res.stdout)
                     if isinstance(parsed, list):
+                        print(f"[CLI Introspect] Multi-schema dump successful: {len(parsed)} tools")
                         # Return the list of manifests (multi-tool)
                         return parsed, None, None
                 except json.JSONDecodeError:
+                    print(f"[CLI Introspect] Multi-schema JSON decode failed")
                     pass
-        except Exception:
+        except Exception as e:
+            print(f"[CLI Introspect] Multi-schema dump exception: {e}")
             pass
         # 2) Fallback: single schema dump
         try:
+            print(f"[CLI Introspect] Trying single schema dump for {path}")
             res = subprocess.run(
                 [sys.executable, str(path), SCHEMA_DUMP_FLAG],
-                capture_output=True, text=True, timeout=3, check=False
+                capture_output=True, text=True, timeout=10, check=False
             )
+            print(f"[CLI Introspect] Single schema dump result: rc={res.returncode}, stdout_len={len(res.stdout)}, stderr={res.stderr[:100]}")
             if res.returncode == 0 and res.stdout:
                 try:
                     parsed = json.loads(res.stdout)
                     if isinstance(parsed, list):
+                        print(f"[CLI Introspect] Single schema dump returned list: {len(parsed)} tools")
                         # Return the list of manifests (multi-tool)
                         return parsed, None, None
                     params = parsed.get("parameters") if isinstance(parsed, dict) else None
                     desc = parsed.get("description") if isinstance(parsed, dict) else None
                     if params and desc is not None:
+                        print(f"[CLI Introspect] Single schema dump successful: {desc}")
                         runner = _make_runner([sys.executable, str(path)])
                         return params, desc, runner
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    print(f"[CLI Introspect] Single schema JSON decode failed: {e}")
                     pass
-        except Exception:
+        except Exception as e:
+            print(f"[CLI Introspect] Single schema dump exception: {e}")
             pass
-        # 3) Fallback: argparse capture via --help
-        parser = _capture_argparse(path)
-        if parser:
-            props, req, desc = _schema_from_parser(parser)
-        else:
+        # 3) Fallback: help text parsing (safer than argparse capture)
+        try:
             help_txt = subprocess.run([sys.executable, str(path), "--help"],
-                                      capture_output=True, text=True).stdout
+                                      capture_output=True, text=True, timeout=5).stdout
             props, req, desc = _from_help_text(help_txt)
+        except subprocess.TimeoutExpired:
+            print(f"[CLI Introspect] Help command timed out for {path}, using minimal schema")
+            props, req, desc = {}, [], "(no description - help timed out)"
+        except Exception as e:
+            print(f"[CLI Introspect] Help command failed for {path}: {e}, using minimal schema")
+            props, req, desc = {}, [], "(no description - help failed)"
+        
         schema = {"type": "object", "properties": props, "required": req}
         runner = _make_runner([sys.executable, str(path)])
         return schema, desc, runner
