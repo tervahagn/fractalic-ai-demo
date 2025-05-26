@@ -10,6 +10,8 @@
 6. Using Model-Context-Protocol (MCP) servers
 7. FAQ & troubleshooting
 
+> **📋 For detailed technical specifications on building autodiscoverable tools, see the [Autodiscoverable Tools Technical Specification Document (TSD)](./autodiscoverable-tools-tsd.md)**
+
 ---
 
 ## 1.  Why tools are first-class citizens in Fractalic
@@ -117,17 +119,21 @@ print(requests.get(url, timeout=5).text)
 
 ## 4.  Contract for auto-discoverable scripts
 
+> **📋 For complete implementation requirements, examples, and best practices, see the [Autodiscoverable Tools TSD](./autodiscoverable-tools-tsd.md)**
+
 | Requirement                                                      | Why it matters                                                           | Python CLI (`python-cli`)                                   | Bash CLI (`bash-cli`)                                    |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------- | -------------------------------------------------------- |
-| **1. Must exit 0 on `--help`**                                   | Registry interrogates the script; non-zero exit is assumed “not a tool”. | `argparse` does this by default.                             | Add a `show_help` function + `[[ $1 == --help ]]` guard. |
-| **2. First non-blank help line is a short description**          | Shown in UI and prompt context.                                          | Provided by `description=` in `ArgumentParser`.             | Put a plain sentence before “Usage: …”.                  |
+| **1. Must exit 0 on `--help`**                                   | Registry interrogates the script; non-zero exit is assumed "not a tool". | `argparse` does this by default.                             | Add a `show_help` function + `[[ $1 == --help ]]` guard. |
+| **2. First non-blank help line is a short description**          | Shown in UI and prompt context.                                          | Provided by `description=` in `ArgumentParser`.             | Put a plain sentence before "Usage: …".                  |
 | **3. Options must be visible as `--flag ARG` in help**           | Regex / argparse walker extracts them into JSON schema.                  | `argparse` prints exactly that.                              | Document each flag in help block (see example).          |
 | **4. Every `add_argument` must include a `help` string**         | Ensures parameter descriptions show up in the generated schema.          | Use `help="..."` on all flags.                             |                                                          |
-| **5. Implement `get_tool_schema()` and support `--fractalic-dump-schema`** | Allows direct schema JSON output, bypassing fragile help parsing.         | Define `get_tool_schema()` returning full JSON schema object; check for `--fractalic-dump-schema` in `__main__`. |                                                          |
+| **5. Implement `--fractalic-dump-schema` support** *(required)*  | Enables direct JSON schema output, bypassing help text parsing.         | Check for flag and output JSON schema via `get_tool_schema()` | Not commonly supported for bash scripts                 |
 | **6. Script should print JSON on stdout** *(recommended)*        | Allows LLM to keep reasoning on structured data.                         | `print(json.dumps(...))`                                     | `echo '{"key":"value"}'`                                 |
 
-*Violating the contract doesn’t break execution, but the model will see an
-empty or incomplete parameter list and may fail to call the tool.*
+**Advanced Features** (see TSD for details):
+- **Multi-tool support**: Single script exposing multiple tool functions via `--fractalic-dump-multi-schema`
+- **Parameter validation**: Type constraints, enums, required fields
+- **Error handling**: Structured error responses
 
 ---
 
