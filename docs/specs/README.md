@@ -2,37 +2,68 @@
 
 This directory contains documentation for building and using tools in the Fractalic workflow system.
 
+## Recommended Approach: Simple JSON Convention
+
+**Start here for new tool development!** The Simple JSON Convention provides the fastest path from idea to working tool:
+
+```python
+#!/usr/bin/env python3
+"""Tool description."""
+import json, sys
+
+def process_data(data):
+    # Your tool logic here
+    return {"result": "success"}
+
+def main():
+    if len(sys.argv) == 2 and sys.argv[1] == '{"__test__": true}':
+        print(json.dumps({"success": True, "_simple": True}))
+        return
+    
+    try:
+        params = json.loads(sys.argv[1])
+        result = process_data(params)
+        print(json.dumps(result, ensure_ascii=False))
+    except Exception as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        sys.exit(1)
+
+if __name__ == "__main__": main()
+```
+
+**Benefits**: 90% less code, automatic discovery, perfect LLM integration.
+
 ## Documents
 
 ### [Tool Plug-in & Auto-Discovery Guide](./tools.md)
-**Overview document** covering the basics of the Fractalic tool system, including:
-- Why tools are first-class citizens
-- How the registry builds the master tool list  
-- Comparison of explicit manifests vs auto-discovery
+**Overview document** covering the Fractalic tool system, including:
+- **Simple JSON Convention** (top priority approach)
+- Tool autodiscovery priority order
+- Legacy approaches for backward compatibility
 - Tool lifecycle and execution
 - MCP server integration
 - FAQ and troubleshooting
 
 ### [Autodiscoverable Tools Technical Specification Document (TSD)](./autodiscoverable-tools-tsd.md)
-**Comprehensive technical specification** for building autodiscoverable tools, including:
-- Detailed implementation requirements
-- Schema format specifications
-- Single-tool vs multi-tool patterns
+**Comprehensive technical specification** with implementation details:
+- Simple JSON Convention requirements and examples
+- Legacy pattern documentation
+- Schema format specifications  
 - Parameter types and validation
-- Complete implementation examples
 - Best practices and testing strategies
-- Advanced debugging techniques
+- Migration guidance
 
 ## Quick Start
 
-1. **Read the overview**: Start with [tools.md](./tools.md) to understand the system
-2. **Follow the TSD**: Use [autodiscoverable-tools-tsd.md](./autodiscoverable-tools-tsd.md) for implementation details
-3. **Study examples**: Reference `fractalic_generator.py` in the tools directory as a complete example
+1. **Use Simple JSON**: Copy the template above and implement your `process_data()` function
+2. **Drop in tools/**: Save to `tools/my_tool.py` 
+3. **Restart Fractalic**: Tool is automatically discovered and available to LLMs
+4. **Optional**: Read [tools.md](./tools.md) for advanced features
 
 ## Key Concepts
 
-- **Auto-discovery**: Tools can register themselves without manual YAML manifests
-- **Schema dumping**: Tools expose their parameter schema via `--fractalic-dump-schema`
-- **Multi-tool support**: Single scripts can expose multiple tool functions
+- **Simple JSON Convention**: Top priority autodiscovery (recommended)
+- **Auto-discovery priority**: Simple JSON → Schema dumps → Help text → ArgumentParser
+- **Schema dumping**: Optional rich parameter definitions via `--fractalic-dump-schema`
 - **OpenAI compatibility**: Tool schemas follow OpenAI function calling format
 - **Language agnostic**: Python, Bash, or any CLI-compatible executable

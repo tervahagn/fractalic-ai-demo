@@ -121,6 +121,72 @@ print(requests.get(url, timeout=5).text)
 
 > **📋 For complete implementation requirements, examples, and best practices, see the [Autodiscoverable Tools TSD](./autodiscoverable-tools-tsd.md)**
 
+### 4.1 Simple JSON Convention (Top Priority)
+
+**The Simple JSON Convention is the RECOMMENDED approach for new tools**, automatically detected first during autodiscovery:
+
+#### **Discovery Priority Order:**
+1. **🥇 Simple JSON Convention** ← **RECOMMENDED**
+2. 🥈 Multi-schema dump (`--fractalic-dump-multi-schema`)
+3. 🥉 Single schema dump (`--fractalic-dump-schema`)
+4. 🏅 Help text parsing (`--help`)
+5. 🎖️ ArgumentParser introspection
+
+#### **Simple JSON Requirements:**
+| Requirement | Implementation |
+|-------------|----------------|
+| **Test response** | Must respond to `'{"__test__": true}'` with `{"success": true, "_simple": true}` |
+| **JSON I/O** | Accept JSON as single argument, output JSON to stdout |
+| **Schema dump** *(optional)* | Support `--fractalic-dump-schema` for rich parameter definitions |
+| **Error handling** | Return errors as JSON: `{"error": "message"}` |
+
+#### **Simple JSON Template:**
+```python
+#!/usr/bin/env python3
+"""Tool description goes here."""
+import json, sys
+
+def process_data(data):
+    action = data.get("action")
+    if action == "example":
+        return {"result": "success"}
+    return {"error": f"Unknown action: {action}"}
+
+def main():
+    # Test mode for autodiscovery
+    if len(sys.argv) == 2 and sys.argv[1] == '{"__test__": true}':
+        print(json.dumps({"success": True, "_simple": True}))
+        return
+    
+    # Optional: Schema dump for rich LLM integration
+    if len(sys.argv) == 2 and sys.argv[1] == "--fractalic-dump-schema":
+        schema = {
+            "description": "Tool description",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["example"]}
+                },
+                "required": ["action"]
+            }
+        }
+        print(json.dumps(schema, ensure_ascii=False))
+        return
+    
+    # Process JSON input
+    try:
+        params = json.loads(sys.argv[1])
+        result = process_data(params)
+        print(json.dumps(result, ensure_ascii=False))
+    except Exception as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        sys.exit(1)
+
+if __name__ == "__main__": main()
+```
+
+### 4.2 Legacy Approaches (Backward Compatibility)
+
 | Requirement                                                      | Why it matters                                                           | Python CLI (`python-cli`)                                   | Bash CLI (`bash-cli`)                                    |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------- | -------------------------------------------------------- |
 | **1. Must exit 0 on `--help`**                                   | Registry interrogates the script; non-zero exit is assumed "not a tool". | `argparse` does this by default.                             | Add a `show_help` function + `[[ $1 == --help ]]` guard. |
@@ -218,6 +284,14 @@ print(requests.get(url, timeout=5).text)
 
 ## TL;DR for tool authors
 
+### Recommended: Simple JSON Convention
+> 1. Write a script that **accepts JSON input** and **returns JSON output**.
+> 2. Handle test mode: `'{"__test__": true}'` → `{"success": true, "_simple": true}`
+> 3. Drop it under `tools/` (no YAML required for autodiscovery).
+> 4. Restart Fractalic (or call `registry.rescan()`).
+> 5. The LLM can now invoke your script with any JSON parameters—done!
+
+### Legacy Approach (Backward Compatibility)
 > 1. Write a script that **prints helpful `--help` text**, **returns JSON on stdout**, and **implements `get_tool_schema()` with `--fractalic-dump-schema` support**.
 > 2. Drop it under `tools/` (no YAML required for autodiscovery).
 > 3. Restart Fractalic (or call `registry.rescan()`).

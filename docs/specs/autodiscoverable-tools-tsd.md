@@ -31,31 +31,124 @@ graph TD
     A[Script in tools/] --> B{Has .yaml?}
     B -->|Yes| C[Use YAML manifest]
     B -->|No| D[Auto-discovery]
-    D --> E[Try --fractalic-dump-schema]
-    E --> F{Schema dump success?}
-    F -->|Yes| G[Parse JSON schema]
-    F -->|No| H[Fallback to --help parsing]
-    G --> I[Register tool(s)]
-    H --> I
+    D --> E[Try Simple JSON Test]
+    E --> F{JSON response?}
+    F -->|Yes| G[Simple JSON Convention]
+    F -->|No| H[Try --fractalic-dump-schema]
+    H --> I{Schema dump success?}
+    I -->|Yes| J[Parse JSON schema]
+    I -->|No| K[Fallback to --help parsing]
+    G --> L[Register tool(s)]
+    J --> L
+    K --> L
 ```
+
+### Discovery Priority Order
+1. **🥇 Simple JSON Convention** - Test with `'{"__test__": true}'`
+2. 🥈 Multi-schema dump - `--fractalic-dump-multi-schema`
+3. 🥉 Single schema dump - `--fractalic-dump-schema`
+4. 🏅 Help text parsing - `--help`
+5. 🎖️ ArgumentParser introspection (fallback)
 
 ---
 
 ## Architecture
 
 ### Tool Registry Integration
-The `ToolRegistry` class manages autodiscovery through the `_autodiscover_cli()` method:
+The `ToolRegistry` class manages autodiscovery through the `_autodiscover_cli()` method with priority-based discovery:
 
 1. **File Discovery**: Scans `tools/` directory for `.py` and `.sh` files without companion `.yaml`
-2. **Schema Introspection**: Calls `cli_introspect.sniff()` to extract tool metadata
-3. **Registration**: Creates tool manifests and execution wrappers
-4. **Schema Generation**: Produces OpenAI-compatible function schemas for LLM consumption
+2. **Simple JSON Test**: First tests with `'{"__test__": true}'` (highest priority)
+3. **Schema Introspection**: Falls back to `cli_introspect.sniff()` for legacy approaches
+4. **Registration**: Creates tool manifests and execution wrappers
+5. **Schema Generation**: Produces OpenAI-compatible function schemas for LLM consumption
 
 ### Command Types
-- **`python-cli`**: Python scripts with argparse interface
-- **`bash-cli`**: Shell scripts with documented CLI interface
+- **`simple-json`**: Simple JSON input/output convention (RECOMMENDED)
+- **`python-cli`**: Python scripts with argparse interface (legacy)
+- **`bash-cli`**: Shell scripts with documented CLI interface (legacy)
 
 ---
+
+## Implementation Requirements
+
+### Simple JSON Convention (Recommended)
+
+#### **Mandatory Requirements**
+1. **Test Mode Response**: Must respond to `'{"__test__": true}'` with `{"success": true, "_simple": true}`
+2. **JSON Input**: Accept single JSON string argument via `sys.argv[1]`
+3. **JSON Output**: Print JSON response to stdout using `json.dumps()`
+4. **Error Handling**: Return errors as JSON: `{"error": "message"}`
+5. **UTF-8 Support**: Use `ensure_ascii=False` in `json.dumps()`
+
+#### **Optional Enhancements**
+1. **Schema Dump**: Support `--fractalic-dump-schema` for rich parameter definitions
+2. **Multi-tool**: Support `--fractalic-dump-multi-schema` for multiple functions
+
+#### **Simple JSON Template**
+```python
+#!/usr/bin/env python3
+"""Brief description of the tool functionality."""
+import json
+import sys
+
+def process_data(data):
+    """Main processing function."""
+    action = data.get("action")
+    
+    if action == "example":
+        param = data.get("param", "default")
+        return {"result": f"Processed {param}"}
+    
+    return {"error": f"Unknown action: {action}"}
+
+def main():
+    # Test mode for autodiscovery (REQUIRED)
+    if len(sys.argv) == 2 and sys.argv[1] == '{"__test__": true}':
+        print(json.dumps({"success": True, "_simple": True}))
+        return
+    
+    # Optional: Rich schema for better LLM integration
+    if len(sys.argv) == 2 and sys.argv[1] == "--fractalic-dump-schema":
+        schema = {
+            "description": "Brief description of the tool functionality",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["example"],
+                        "description": "Action to perform"
+                    },
+                    "param": {
+                        "type": "string",
+                        "description": "Parameter for processing"
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+        print(json.dumps(schema, ensure_ascii=False))
+        return
+    
+    # Process JSON input (REQUIRED)
+    try:
+        if len(sys.argv) != 2:
+            raise ValueError("Expected exactly one JSON argument")
+        
+        params = json.loads(sys.argv[1])
+        result = process_data(params)
+        print(json.dumps(result, ensure_ascii=False))
+        
+    except Exception as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+```
+
+### Legacy Approaches (Backward Compatibility)
 
 ## Schema Format Specification
 
@@ -169,7 +262,82 @@ if args.fractalic_dump_multi_schema:
 
 ## Single-Tool vs Multi-Tool Patterns
 
-### Single-Tool Pattern
+### Simple JSON Pattern (Recommended)
+**Use when**: You want minimal boilerplate and flexible functionality
+
+```python
+#!/usr/bin/env python3
+"""Weather data fetcher with multiple actions"""
+import json, sys, requests
+
+def process_data(data):
+    action = data.get("action")
+    
+    if action == "current_weather":
+        lat, lon = data.get("latitude"), data.get("longitude")
+        if not lat or not lon:
+            return {"error": "latitude and longitude required"}
+        
+        # Mock API call
+        return {
+            "location": {"lat": lat, "lon": lon},
+            "temperature": 22,
+            "condition": "sunny"
+        }
+    
+    elif action == "forecast":
+        location = data.get("location")
+        days = data.get("days", 3)
+        # Mock forecast
+        return {
+            "location": location,
+            "forecast": [{"day": i+1, "temp": 20+i} for i in range(days)]
+        }
+    
+    return {"error": f"Unknown action: {action}"}
+
+def main():
+    # Test mode (REQUIRED)
+    if len(sys.argv) == 2 and sys.argv[1] == '{"__test__": true}':
+        print(json.dumps({"success": True, "_simple": True}))
+        return
+    
+    # Optional: Rich schema
+    if len(sys.argv) == 2 and sys.argv[1] == "--fractalic-dump-schema":
+        schema = {
+            "description": "Weather data fetcher with multiple actions",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["current_weather", "forecast"],
+                        "description": "Weather action to perform"
+                    },
+                    "latitude": {"type": "number", "description": "Latitude (-90 to 90)"},
+                    "longitude": {"type": "number", "description": "Longitude (-180 to 180)"},
+                    "location": {"type": "string", "description": "Location name for forecast"},
+                    "days": {"type": "integer", "description": "Forecast days (default: 3)"}
+                },
+                "required": ["action"]
+            }
+        }
+        print(json.dumps(schema, ensure_ascii=False))
+        return
+    
+    # Process JSON input
+    try:
+        params = json.loads(sys.argv[1])
+        result = process_data(params)
+        print(json.dumps(result, ensure_ascii=False))
+    except Exception as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        sys.exit(1)
+
+if __name__ == "__main__": main()
+```
+
+### Legacy Single-Tool Pattern
 **Use when**: Script performs one primary function with variations via parameters
 
 ```python
@@ -205,6 +373,23 @@ def get_tool_schema():
             "required": ["latitude", "longitude"]
         }
     }
+
+# Legacy argparse implementation
+parser = argparse.ArgumentParser(description="Weather data fetcher")
+parser.add_argument("--latitude", type=float, required=True, help="Latitude (-90 to 90)")
+parser.add_argument("--longitude", type=float, required=True, help="Longitude (-180 to 180)")
+parser.add_argument("--units", choices=["metric", "imperial"], default="metric", help="Temperature units")
+parser.add_argument("--fractalic-dump-schema", action="store_true", help=argparse.SUPPRESS)
+args = parser.parse_args()
+
+if args.fractalic_dump_schema:
+    print(json.dumps(get_tool_schema(), indent=2))
+    exit(0)
+
+# Tool logic...
+```
+
+### Legacy Multi-Tool Pattern
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch current weather data for a geographic location")
