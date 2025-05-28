@@ -286,6 +286,14 @@ class liteclient:
             api_key= self.api_key
         )
 
+        # Remove or fix unsupported params for O-series models (e.g., o4-mini)
+        model_name = op.get("model", self.model)
+        if model_name in ["o4-mini", "openai/o4-mini"]:
+            params.pop("top_p", None)
+            # O-series only supports temperature=1
+            if "temperature" in params and params["temperature"] != 1:
+                params["temperature"] = 1
+
         # Handle tools parameter
         tools_param = op.get("tools", "none")
         if tools_param == "none":
