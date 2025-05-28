@@ -98,6 +98,23 @@ class ToolRegistry(dict):
                 continue
             cmd_type = "python-cli" if src.suffix == ".py" else "bash-cli"
             schema, desc, runner = sniff_cli(src, cmd_type)
+            
+            # Check if sniff_cli returned simple tool detection (schema will be dict, not list)
+            if isinstance(schema, dict) and schema.get("description") == "Simple JSON tool - accepts JSON input, returns JSON output":
+                # This is a simple JSON tool
+                name = src.stem
+                manifest = {
+                    "name": name,
+                    "description": desc,
+                    "command": "simple-json",
+                    "entry": str(src),
+                    "parameters": schema,
+                    "_auto": True,
+                    "_simple": True,  # Mark as simple tool
+                }
+                self._register(manifest, runner_override=runner)
+                continue
+            
             if isinstance(schema, list):
                 # Register each manifest in the list (multi-tool)
                 for manifest in schema:
@@ -282,6 +299,35 @@ class ToolRegistry(dict):
         cmd = meta.get("command", "python")
         if runner_override:
             runner = runner_override
+
+        elif cmd == "simple-json":
+            # Simple JSON in/out tool
+            path = Path(meta["entry"])
+            def simple_json_runner(**kw):
+                json_input = json.dumps(kw)
+                env = None
+                if Config.TOML_SETTINGS and 'environment' in Config.TOML_SETTINGS:
+                    env = os.environ.copy()
+                    for item in Config.TOML_SETTINGS['environment']:
+                        if 'key' in item and 'value' in item:
+                            env[item['key']] = item['value']
+                
+                result = subprocess.run(
+                    [sys.executable, str(path), json_input],
+                    capture_output=True, text=True, env=env, timeout=30
+                )
+                if result.returncode != 0:
+                    try:
+                        error_data = json.loads(result.stderr)
+                        raise RuntimeError(json.dumps(error_data))
+                    except json.JSONDecodeError:
+                        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+                
+                try:
+                    return json.loads(result.stdout)
+                except json.JSONDecodeError:
+                    return {"result": result.stdout.strip()}
+            runner = simple_json_runner
 
         elif cmd == "python" and ":" in meta["entry"]:
             mod, fn = meta["entry"].split(":")

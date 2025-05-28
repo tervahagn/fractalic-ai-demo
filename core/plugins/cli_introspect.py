@@ -30,6 +30,55 @@ HELP_RE = re.compile(
     r"^\s*(?:-\w,\s*)?(--[\w-]+)(?:\s+([A-Z\[\]<>\w-]+))?", re.MULTILINE
 )
 
+def _extract_description_from_file(file_path: Path) -> str:
+    """Extract description from Python file docstring or comments"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        # Look for module docstring
+        in_docstring = False
+        docstring_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Skip empty lines and shebang
+            if not line or line.startswith('#!'):
+                continue
+            
+            # Start of docstring
+            if line.startswith('"""') or line.startswith("'''"):
+                if line.count('"""') == 2 or line.count("'''") == 2:
+                    # Single line docstring
+                    return line.strip('"""').strip("'''").strip()
+                in_docstring = True
+                docstring_lines.append(line[3:])
+                continue
+            
+            # End of docstring
+            if in_docstring and (line.endswith('"""') or line.endswith("'''")):
+                docstring_lines.append(line[:-3])
+                return ' '.join(docstring_lines).strip()
+            
+            # Inside docstring
+            if in_docstring:
+                docstring_lines.append(line)
+                continue
+            
+            # Look for comment description
+            if line.startswith('#') and 'description:' in line.lower():
+                return line.split(':', 1)[1].strip()
+            
+            # Stop at first non-comment, non-docstring line
+            if not line.startswith('#'):
+                break
+                
+    except Exception:
+        pass
+    
+    return f"Simple tool: {file_path.stem}"
+
 def _from_help_text(txt: str) -> Tuple[Dict[str, Any], List[str], str]:
     lines = [l.strip() for l in txt.splitlines() if l.strip()]
     desc = next((l for l in lines if not l.lower().startswith("usage")), "(no description)")
@@ -117,6 +166,87 @@ def sniff(path: Path, kind: str):
     """
     path = path.expanduser().absolute()
     if kind == "python-cli":
+        # 0) Try simple JSON in/out convention first
+        try:
+            print(f"[CLI Introspect] Trying simple JSON convention for {path}")
+            # Test if tool accepts JSON input and returns JSON output
+            test_input = '{"__test__": true}'
+            res = subprocess.run(
+                [sys.executable, str(path), test_input],
+                capture_output=True, text=True, timeout=5, check=False
+            )
+            print(f"[CLI Introspect] Simple JSON test result: rc={res.returncode}, stdout_len={len(res.stdout)}")
+            
+            if res.returncode == 0 and res.stdout:
+                try:
+                    # Check if output is valid JSON
+                    json.loads(res.stdout)
+                    print(f"[CLI Introspect] Simple JSON convention detected for {path}")
+                    
+                    # Try to get detailed schema if available
+                    schema = None
+                    desc = None
+                    
+                    # Try schema dump first for detailed schema
+                    try:
+                        schema_res = subprocess.run(
+                            [sys.executable, str(path), "--fractalic-dump-schema"],
+                            capture_output=True, text=True, timeout=5, check=False
+                        )
+                        if schema_res.returncode == 0 and schema_res.stdout:
+                            schema_data = json.loads(schema_res.stdout)
+                            if isinstance(schema_data, dict) and "parameters" in schema_data:
+                                schema = schema_data["parameters"]
+                                desc = schema_data.get("description", "Simple JSON tool")
+                                print(f"[CLI Introspect] Got detailed schema for simple JSON tool: {len(schema.get('properties', {}))} properties")
+                    except (json.JSONDecodeError, Exception):
+                        print(f"[CLI Introspect] Schema dump failed, using generic schema")
+                        pass
+                    
+                    # Fallback to generic schema if detailed schema not available
+                    if not schema:
+                        desc = _extract_description_from_file(path)
+                        schema = {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": True,
+                            "description": "Simple JSON tool - accepts JSON input, returns JSON output"
+                        }
+                    
+                    # Create a simple runner that passes JSON directly
+                    def simple_runner(**kw):
+                        json_input = json.dumps(kw)
+                        env = None
+                        if Config.TOML_SETTINGS and 'environment' in Config.TOML_SETTINGS:
+                            env = os.environ.copy()
+                            for item in Config.TOML_SETTINGS['environment']:
+                                if 'key' in item and 'value' in item:
+                                    env[item['key']] = item['value']
+                        
+                        result = subprocess.run(
+                            [sys.executable, str(path), json_input],
+                            capture_output=True, text=True, env=env, timeout=30
+                        )
+                        if result.returncode != 0:
+                            try:
+                                error_data = json.loads(result.stderr)
+                                raise RuntimeError(json.dumps(error_data))
+                            except json.JSONDecodeError:
+                                raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+                        
+                        try:
+                            return json.loads(result.stdout)
+                        except json.JSONDecodeError:
+                            return {"result": result.stdout.strip()}
+                    
+                    return schema, desc, simple_runner
+                except json.JSONDecodeError:
+                    print(f"[CLI Introspect] Simple JSON test failed - output not JSON")
+                    pass
+        except Exception as e:
+            print(f"[CLI Introspect] Simple JSON test exception: {e}")
+            pass
+        
         # 1) Try multi-schema dump
         try:
             print(f"[CLI Introspect] Trying multi-schema dump for {path}")
@@ -208,64 +338,44 @@ def _get_type_from_action(action: argparse.Action) -> str:
 def introspect_script(script_path: str) -> Optional[Dict[str, Any]]:
     """
     Introspects a Python script to generate an OpenAI tool schema.
-
-    1. Tries executing script with SCHEMA_DUMP_FLAG to get JSON schema directly.
-    2. Falls back to executing with --help and parsing ArgumentParser.
-    3. (Optional) Further fallback to regex parsing of --help text.
+    Uses the updated sniff function with simple JSON convention support.
     """
-    # 1. Try direct schema dump
     try:
-        result = subprocess.run(
-            [sys.executable, script_path, SCHEMA_DUMP_FLAG],
-            capture_output=True,
-            text=True,
-            timeout=5, # Add a timeout
-            check=False, # Don't raise exception on non-zero exit
-        )
-        if result.returncode == 0 and result.stdout:
-            try:
-                schema = json.loads(result.stdout)
-                # If schema is a list, it's a multi-tool schema
-                if isinstance(schema, list):
-                    return schema
-                # Basic validation: check for top-level keys
-                if isinstance(schema, dict) and "name" in schema and "parameters" in schema:
-                     # Wrap it in the standard function structure
-                     return {
-                         "type": "function",
-                         "function": schema
-                     }
-                else:
-                     print(f"[WARN] cli_introspect: Invalid schema structure from {script_path} {SCHEMA_DUMP_FLAG}", file=sys.stderr)
-            except json.JSONDecodeError as e:
-                print(f"[WARN] cli_introspect: Failed to parse JSON from {script_path} {SCHEMA_DUMP_FLAG}: {e}", file=sys.stderr)
-                # Optionally print result.stdout[:500] for debugging
-        # else: # Optional: Log if dump command failed
-        #    print(f"[DEBUG] cli_introspect: Schema dump failed for {script_path}. Exit={result.returncode}, Stderr={result.stderr.strip()}", file=sys.stderr)
-
-    except FileNotFoundError:
-         print(f"[ERROR] cli_introspect: Python executable not found at {sys.executable}", file=sys.stderr)
-         return None
-    except subprocess.TimeoutExpired:
-         print(f"[WARN] cli_introspect: Timeout executing {script_path} {SCHEMA_DUMP_FLAG}", file=sys.stderr)
+        path = Path(script_path)
+        
+        # Use the updated sniff function with simple JSON support
+        result = sniff(path, "python-cli")
+        
+        # Handle different return types from sniff
+        if isinstance(result, tuple) and len(result) == 3:
+            schema, description, runner = result
+            
+            # For simple JSON tools, mark them as such
+            if schema and schema.get("description") == "Simple JSON tool - accepts JSON input, returns JSON output":
+                tool_name = path.stem
+                return {
+                    "name": tool_name,
+                    "description": description or f"Simple JSON tool: {tool_name}",
+                    "command": "simple-json",
+                    "parameters": schema,
+                    "_simple": True
+                }
+            else:
+                # Regular tool
+                tool_name = path.stem
+                return {
+                    "name": tool_name,
+                    "description": description or f"Tool: {tool_name}",
+                    "command": "python-cli",
+                    "parameters": schema
+                }
+        elif isinstance(result, list):
+            # Multi-tool result
+            return result
+        else:
+            print(f"[ERROR] cli_introspect: Unexpected result type from sniff for {script_path}", file=sys.stderr)
+            return None
+            
     except Exception as e:
-         print(f"[WARN] cli_introspect: Error during schema dump for {script_path}: {e}", file=sys.stderr)
-
-
-    # 2. Fallback: Capture ArgumentParser via --help
-    print(f"[DEBUG] cli_introspect: Falling back to argparse capture for {script_path}", file=sys.stderr)
-    parser = _capture_argparse(script_path)
-    if parser:
-        try:
-            return _schema_from_parser(parser)
-        except Exception as e:
-            print(f"[WARN] cli_introspect: Error building schema from parser for {script_path}: {e}", file=sys.stderr)
-
-    # 3. Fallback: Regex parsing (if _from_help_text exists and is desired)
-    # print(f"[DEBUG] cli_introspect: Falling back to regex help parsing for {script_path}", file=sys.stderr)
-    # help_text = _get_help_text(script_path) # Assuming _get_help_text exists
-    # if help_text:
-    #     return _from_help_text(script_path, help_text) # Assuming _from_help_text exists
-
-    print(f"[ERROR] cli_introspect: Failed to generate schema for {script_path}", file=sys.stderr)
-    return None
+        print(f"[ERROR] cli_introspect: Failed to introspect {script_path}: {e}", file=sys.stderr)
+        return None
