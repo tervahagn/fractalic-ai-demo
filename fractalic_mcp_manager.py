@@ -35,7 +35,7 @@ DEFAULT_PORT = 5859
 State     = Literal["starting", "running", "retrying", "stopped", "errored"]
 Transport = Literal["stdio", "http"]
 
-TIMEOUT_RPC   = 30         # s – RPC time-out
+TIMEOUT_INITIAL = 120      # s – Increased timeout for slow operations like Zapier
 HEALTH_INT    = 45         # s – between health probes (increased to avoid heartbeat clashes)
 SESSION_TTL   = 3600       # s – refresh session after this period
 MAX_RETRY     = 5
@@ -428,7 +428,7 @@ class Child:
             try:
                 await asyncio.sleep(HEALTH_INT)
                 await self._ensure_session()
-                await asyncio.wait_for(self.session.list_tools(), timeout=TIMEOUT_RPC / 3)
+                await asyncio.wait_for(self.session.list_tools(), timeout=TIMEOUT_INITIAL / 3)
                 self.healthy = True        # Mark as healthy after successful tool list
                 self.health_failures = 0   # Reset on success
             except asyncio.CancelledError:
@@ -483,13 +483,25 @@ class Child:
 
     async def list_tools(self):
         await self._ensure_session()
-        return await asyncio.wait_for(self.session.list_tools(), TIMEOUT_RPC)
+        return await asyncio.wait_for(self.session.list_tools(), TIMEOUT_INITIAL)
 
     async def call_tool(self, tool: str, args: dict):
         await self._ensure_session()
-        return await asyncio.wait_for(
-            self.session.call_tool(tool, args), TIMEOUT_RPC)
-
+        
+        log(f"{self.name}: Calling tool '{tool}' with timeout {TIMEOUT_INITIAL}s")
+        try:
+            result = await asyncio.wait_for(
+                self.session.call_tool(tool, args), TIMEOUT_INITIAL)
+            log(f"{self.name}: Tool '{tool}' completed successfully")
+            return result
+        except asyncio.TimeoutError as e:
+            error_msg = f"Tool '{tool}' timed out after {TIMEOUT_INITIAL}s"
+            log(f"{self.name}: {error_msg}")
+            raise Exception(error_msg) from e
+        except Exception as e:
+            log(f"{self.name}: Tool '{tool}' failed: {e}")
+            raise
+    
     def info(self):
         return {
             "state":      self.state,
