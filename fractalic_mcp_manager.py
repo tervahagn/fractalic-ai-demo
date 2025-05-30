@@ -10,7 +10,7 @@
 # ---------------------------------------------------------
 from __future__ import annotations
 
-import argparse, asyncio, contextlib, dataclasses, json, os, shlex, signal, subprocess, sys, time, gc
+import argparse, asyncio, contextlib, dataclasses, datetime, json, os, shlex, signal, subprocess, sys, time, gc
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
@@ -21,6 +21,7 @@ from aiohttp_cors import setup as cors_setup, ResourceOptions, CorsViewMixin
 from mcp.client.session          import ClientSession
 from mcp.client.stdio            import stdio_client, StdioServerParameters
 from mcp.client.streamable_http  import streamablehttp_client
+from mcp.client.sse              import sse_client
 
 import errno
 import tiktoken
@@ -39,6 +40,110 @@ HEALTH_INT    = 45         # s – between health probes (increased to avoid hea
 SESSION_TTL   = 3600       # s – refresh session after this period
 MAX_RETRY     = 5
 BACKOFF_BASE  = 2          # exponential back-off
+
+# Configuration flags
+ENABLE_SCHEMA_SANITIZATION = True  # Set to True to enable Vertex AI schema sanitization
+
+# -------------------------------------------------------------------- Vertex AI Schema Sanitization
+def sanitize_tool_schema(tool_obj: dict, max_depth: int = 6) -> dict:
+    """
+    Sanitize MCP tool schema for Vertex AI/Gemini compatibility.
+    
+    Vertex AI has limitations:
+    - Array types like ["object", "null"] cause "Proto field is not repeating" errors
+    - Deep nesting beyond ~6-9 levels causes validation failures
+    - Some JSON Schema constructs like anyOf, oneOf are not supported
+    
+    Args:
+        tool_obj: Tool object with potential inputSchema
+        max_depth: Maximum nesting depth allowed (default 6)
+    
+    Returns:
+        Sanitized tool object safe for Vertex AI
+    """
+    if not isinstance(tool_obj, dict):
+        return tool_obj
+    
+    # Create a copy to avoid mutating the original
+    sanitized = tool_obj.copy()
+    
+    # Apply sanitization to inputSchema if present
+    if "inputSchema" in sanitized:
+        sanitized["inputSchema"] = _sanitize_schema_recursive(sanitized["inputSchema"], max_depth, 0)
+    
+    return sanitized
+
+def _sanitize_schema_recursive(schema: any, max_depth: int, current_depth: int) -> any:
+    """Recursively sanitize a JSON schema for Vertex AI compatibility."""
+    if current_depth >= max_depth:
+        # At max depth, return a simple fallback
+        return {"type": "string", "description": "Complex nested data (simplified for compatibility)"}
+    
+    if not isinstance(schema, dict):
+        return schema
+    
+    sanitized = {}
+    
+    for key, value in schema.items():
+        if key == "type" and isinstance(value, list):
+            # Convert array types to single type - use first non-null type
+            sanitized[key] = _get_first_valid_type(value)
+        elif key == "format":
+            # Remove unsupported format fields for Vertex AI
+            # Vertex AI only supports "enum" and "date-time" formats for STRING type
+            if value in ["enum", "date-time"]:
+                sanitized[key] = value
+            # Skip unsupported formats like "uuid", "uri", etc. by not adding them to sanitized
+        elif key in ["anyOf", "oneOf"]:
+            # Remove unsupported constructs entirely, replace with simple string type
+            sanitized.update(_simplify_union_type(value, max_depth, current_depth))
+            continue  # Skip the original key
+        elif key == "properties" and isinstance(value, dict):
+            # Recursively sanitize properties but limit depth
+            sanitized[key] = {}
+            for prop_name, prop_schema in value.items():
+                sanitized[key][prop_name] = _sanitize_schema_recursive(prop_schema, max_depth, current_depth + 1)
+        elif key == "items" and isinstance(value, dict):
+            # Sanitize array item schemas
+            sanitized[key] = _sanitize_schema_recursive(value, max_depth, current_depth + 1)
+        elif isinstance(value, dict):
+            # Recursively sanitize nested objects
+            sanitized[key] = _sanitize_schema_recursive(value, max_depth, current_depth + 1)
+        elif isinstance(value, list):
+            # Handle lists that might contain schemas
+            sanitized[key] = [
+                _sanitize_schema_recursive(item, max_depth, current_depth + 1) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            # Keep primitive values as-is
+            sanitized[key] = value
+    
+    return sanitized
+
+def _get_first_valid_type(type_list: list) -> str:
+    """Get the first valid type from a list, preferring non-null types."""
+    if not type_list:
+        return "string"
+    
+    # Prefer non-null types
+    for t in type_list:
+        if t != "null":
+            return t
+    
+    # If only null, default to string
+    return "string"
+
+def _simplify_union_type(union_value: any, max_depth: int, current_depth: int) -> dict:
+    """Simplify anyOf/oneOf constructs to a basic type."""
+    if isinstance(union_value, list) and union_value:
+        # Take the first option and sanitize it
+        first_option = union_value[0]
+        if isinstance(first_option, dict):
+            return _sanitize_schema_recursive(first_option, max_depth, current_depth)
+    
+    # Fallback to string type
+    return {"type": "string", "description": "Union type (simplified for compatibility)"}
 
 # -------------------------------------------------------------------- Custom JSON encoder
 class MCPEncoder(json.JSONEncoder):
@@ -251,7 +356,7 @@ class Child:
             asyncio.create_task(capture_output(self.proc.stdout, self.stdout_buffer, 'stdout'))
             asyncio.create_task(capture_output(self.proc.stderr, self.stderr_buffer, 'stderr'))
             
-        except (Exception, asyncio.SubprocessError) as e:
+        except Exception as e:
             log(f"Error spawning {self.name}: {e}")
             raise
 
@@ -262,12 +367,21 @@ class Child:
         await self._close_session()
         self._exit_stack = contextlib.AsyncExitStack()
         if self.transport == "http":
-            transport = await self._exit_stack.enter_async_context(
-                streamablehttp_client(self.spec["url"])
-            )
+            # Check if this is an SSE endpoint (generic detection based on URL path)
+            if self.spec["url"].endswith("/sse"):
+                # Use SSE client for SSE endpoints (returns only read_stream, write_stream)
+                read_stream, write_stream = await self._exit_stack.enter_async_context(
+                    sse_client(self.spec["url"])
+                )
+            else:
+                # Use streamable HTTP client for other HTTP services (returns read_stream, write_stream, _)
+                read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+                    streamablehttp_client(self.spec["url"])
+                )
             self.session = await self._exit_stack.enter_async_context(
                 ClientSession(
-                    transport,
+                    read_stream,
+                    write_stream,
                     client_info={"name": "Fractalic MCP Manager", "version": "0.3.0"},
                 )
             )
@@ -281,8 +395,24 @@ class Child:
             self.session = await self._exit_stack.enter_async_context(
                 ClientSession(*transport)
             )
-        # Mandatory MCP handshake
-        await self.session.initialize()
+        # Mandatory MCP handshake with timeout
+        try:
+            # Add timeout specifically for session initialization to debug Zapier issues
+            init_timeout = 30  # seconds
+            log(f"{self.name}: Starting MCP session initialization (timeout: {init_timeout}s)")
+            await asyncio.wait_for(self.session.initialize(), timeout=init_timeout)
+            log(f"{self.name}: MCP session initialization completed successfully")
+        except asyncio.TimeoutError:
+            error_msg = f"MCP session initialization timed out after {init_timeout}s"
+            log(f"{self.name}: {error_msg}")
+            self.last_error = error_msg
+            raise Exception(error_msg)
+        except Exception as e:
+            error_msg = f"MCP session initialization failed: {e}"
+            log(f"{self.name}: {error_msg}")
+            self.last_error = error_msg
+            raise
+        
         self.session_at = time.time()
         self.started_at = self.started_at or self.session_at
         self.healthy = True               # Mark as healthy after successful handshake
@@ -437,7 +567,12 @@ class Supervisor:
             try:
                 tl = await c.list_tools()
                 tools_list = [tool_to_obj(t) for t in tl.tools]
-                out[n] = {"tools": tools_list}
+                # Apply Vertex AI schema sanitization only if enabled
+                if ENABLE_SCHEMA_SANITIZATION:
+                    sanitized_tools = [sanitize_tool_schema(tool) for tool in tools_list]
+                else:
+                    sanitized_tools = tools_list  # No sanitization
+                out[n] = {"tools": sanitized_tools}
             except Exception as e:
                 log(f"Error getting tools from {n}: {e}")
                 out[n] = {"error": str(e) or f"Unknown error from {n}", "tools": []}
