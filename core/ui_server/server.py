@@ -288,7 +288,7 @@ async def load_settings():
         print(f"Error loading settings: {str(e)}")
         return JSONResponse(status_code=500, content={"detail": f"Internal Server Error: {str(e)}"})
 
-# Updated run_command endpoint to stream output
+# Updated run_command endpoint to stream output with UTF-8 support
 @app.post("/ws/run_command")
 async def run_command(request: Request):
     data = await request.json()
@@ -301,22 +301,65 @@ async def run_command(request: Request):
 
     try:
         async def stream_command():
+            # Set up UTF-8 environment for the subprocess
+            env = os.environ.copy()
+            env.update({
+                'PYTHONIOENCODING': 'utf-8',
+                'LC_ALL': 'en_US.UTF-8',
+                'LANG': 'en_US.UTF-8'
+            })
+            
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=path
+                cwd=path,
+                env=env
             )
-            # Stream stdout in real-time
+            
+            # Stream stdout with UTF-8-safe chunking to preserve Rich ANSI and encoding
+            buffer = b''
             while True:
-                line = await process.stdout.readline()
-                if not line:
+                chunk = await read_utf8_safe_chunk(process.stdout, 1024)
+                if not chunk:
                     break
-                yield line.decode()
+                
+                # Add to buffer and yield complete chunk
+                buffer += chunk
+                try:
+                    decoded_chunk = buffer.decode('utf-8', errors='strict')
+                    yield decoded_chunk
+                    buffer = b''  # Clear buffer after successful decode
+                except UnicodeDecodeError:
+                    # If we still can't decode, yield with error replacement
+                    decoded_chunk = buffer.decode('utf-8', errors='replace')
+                    yield decoded_chunk
+                    buffer = b''
 
-            # Stream any stderr after stdout is complete
-            async for line in process.stderr:
-                yield line.decode()
+            # Yield any remaining buffer content
+            if buffer:
+                yield buffer.decode('utf-8', errors='replace')
+
+            # Stream any stderr after stdout
+            stderr_buffer = b''
+            while True:
+                chunk = await read_utf8_safe_chunk(process.stderr, 1024)
+                if not chunk:
+                    break
+                
+                stderr_buffer += chunk
+                try:
+                    decoded_chunk = stderr_buffer.decode('utf-8', errors='strict')
+                    yield decoded_chunk
+                    stderr_buffer = b''
+                except UnicodeDecodeError:
+                    decoded_chunk = stderr_buffer.decode('utf-8', errors='replace')
+                    yield decoded_chunk
+                    stderr_buffer = b''
+
+            # Yield any remaining stderr buffer
+            if stderr_buffer:
+                yield stderr_buffer.decode('utf-8', errors='replace')
 
             # Wait for process to complete
             await process.wait()
@@ -379,7 +422,29 @@ async def save_file(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Updated run_fractalic endpoint to stream output
+async def read_utf8_safe_chunk(stream, chunk_size=1024):
+    """Read a chunk that doesn't split UTF-8 characters"""
+    chunk = await stream.read(chunk_size)
+    if not chunk:
+        return chunk
+    
+    # If chunk ends with incomplete UTF-8 sequence, read more bytes
+    while True:
+        try:
+            chunk.decode('utf-8')
+            break  # Valid UTF-8, safe to return
+        except UnicodeDecodeError as e:
+            if e.start < len(chunk) - 4:  # Error not at the end, return what we have
+                break
+            # Read one more byte and try again
+            next_byte = await stream.read(1)
+            if not next_byte:
+                break  # End of stream
+            chunk += next_byte
+            if len(chunk) > chunk_size + 16:  # Prevent infinite loop
+                break
+    return chunk
+
 @app.post("/ws/run_fractalic")
 async def run_fractalic(request: Request):
     data = await request.json()
@@ -398,26 +463,66 @@ async def run_fractalic(request: Request):
     command = f'"{python_exe}" "{fractalic_path}" "{file_path}"'
 
     async def stream_fractalic():
+        # Set up UTF-8 environment for the subprocess
+        env = os.environ.copy()
+        env.update({
+            'PYTHONIOENCODING': 'utf-8',
+            'LC_ALL': 'en_US.UTF-8',
+            'LANG': 'en_US.UTF-8'
+        })
+        
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=root_dir
+            cwd=root_dir,
+            env=env
         )
 
-        # Stream stdout in small chunks instead of entire lines
+        # Stream stdout with UTF-8-safe chunking to preserve Rich ANSI and encoding
+        buffer = b''
         while True:
-            chunk = await process.stdout.read(16)  # read 16 bytes at a time
+            chunk = await read_utf8_safe_chunk(process.stdout, 1024)
             if not chunk:
                 break
-            yield chunk.decode(errors="replace")
+            
+            # Add to buffer and yield complete chunk
+            buffer += chunk
+            try:
+                decoded_chunk = buffer.decode('utf-8', errors='strict')
+                yield decoded_chunk
+                buffer = b''  # Clear buffer after successful decode
+            except UnicodeDecodeError:
+                # If we still can't decode, yield with error replacement
+                # This handles edge cases where the chunk boundary still splits characters
+                decoded_chunk = buffer.decode('utf-8', errors='replace')
+                yield decoded_chunk
+                buffer = b''
+
+        # Yield any remaining buffer content
+        if buffer:
+            yield buffer.decode('utf-8', errors='replace')
 
         # Stream any stderr after stdout
+        stderr_buffer = b''
         while True:
-            chunk = await process.stderr.read(16)
+            chunk = await read_utf8_safe_chunk(process.stderr, 1024)
             if not chunk:
                 break
-            yield chunk.decode(errors="replace")
+            
+            stderr_buffer += chunk
+            try:
+                decoded_chunk = stderr_buffer.decode('utf-8', errors='strict')
+                yield decoded_chunk
+                stderr_buffer = b''
+            except UnicodeDecodeError:
+                decoded_chunk = stderr_buffer.decode('utf-8', errors='replace')
+                yield decoded_chunk
+                stderr_buffer = b''
+
+        # Yield any remaining stderr buffer
+        if stderr_buffer:
+            yield stderr_buffer.decode('utf-8', errors='replace')
 
         await process.wait()
 

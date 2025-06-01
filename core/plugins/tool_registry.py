@@ -181,15 +181,15 @@ class ToolRegistry(dict):
             self._register(manifest, runner_override=runner)
 
     def _load_mcp(self):
-        print(f"[ToolRegistry] MCP servers to load: {self.mcp_servers}")
+        # print(f"[ToolRegistry] MCP servers to load: {self.mcp_servers}")
         for srv in self.mcp_servers:
             try:
-                print(f"[ToolRegistry] Attempting to load tools from {srv}")
+                # print(f"[ToolRegistry] Attempting to load tools from {srv}")
                 response = mcp_list(srv)
-                print(f"[ToolRegistry] MCP {srv} raw response: {response}")
+                # print(f"[ToolRegistry] MCP {srv} raw response: {response}")
                 
                 if not response:
-                    print(f"[ToolRegistry] MCP {srv} returned empty or None response.")
+                    # print(f"[ToolRegistry] MCP {srv} returned empty or None response.")
                     continue
                 
                 # Check if all services have errors
@@ -238,20 +238,20 @@ class ToolRegistry(dict):
                             print(f"[ToolRegistry] No tools found for service {service_name}")
                             continue
                             
-                        print(f"[ToolRegistry] Processing {len(tools)} tools from service: {service_name}")
+                        # print(f"[ToolRegistry] Processing {len(tools)} tools from service: {service_name}")
                         for tool in tools:
                             if "name" not in tool:
-                                print(f"[ToolRegistry] Tool missing name: {tool}")
+                                # print(f"[ToolRegistry] Tool missing name: {tool}")
                                 continue
                                 
-                            print(f"[ToolRegistry] Registering MCP tool manifest: {tool}")
+                            # print(f"[ToolRegistry] Registering MCP tool manifest: {tool}")
                             tool["_mcp"] = srv
                             tool["_service"] = service_name
                             self._register(tool, from_mcp=True)
-                            print(f"[ToolRegistry] Registered MCP tool: {tool.get('name')} from {srv} ({service_name})")
+                            # print(f"[ToolRegistry] Registered MCP tool: {tool.get('name')} from {srv} ({service_name})")
                 else:
-                    print(f"[ToolRegistry] Invalid response format from {srv}: {type(response)}")
-                    
+                    # print(f"[ToolRegistry] Invalid response format from {srv}: {type(response)}")
+                    pass
             except Exception as e:
                 print(f"[ToolRegistry] Error loading MCP server {srv}: {e}", file=sys.stderr)
 
@@ -412,5 +412,5 @@ class ToolRegistry(dict):
 
         # At the end of rescan, print summary if this is the last tool
         if hasattr(self, '_tool_names') and len(self._tool_names) == len(self._manifests):
-            print(f"[ToolRegistry] Discovered tools: {', '.join(self._tool_names)}")
+            # print(f"[ToolRegistry] Discovered tools: {', '.join(self._tool_names)}")
             del self._tool_names

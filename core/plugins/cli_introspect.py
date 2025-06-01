@@ -168,20 +168,20 @@ def sniff(path: Path, kind: str):
     if kind == "python-cli":
         # 0) Try simple JSON in/out convention first
         try:
-            print(f"[CLI Introspect] Trying simple JSON convention for {path}")
+            # print(f"[CLI Introspect] Trying simple JSON convention for {path}")
             # Test if tool accepts JSON input and returns JSON output
             test_input = '{"__test__": true}'
             res = subprocess.run(
                 [sys.executable, str(path), test_input],
                 capture_output=True, text=True, timeout=5, check=False
             )
-            print(f"[CLI Introspect] Simple JSON test result: rc={res.returncode}, stdout_len={len(res.stdout)}")
+            # print(f"[CLI Introspect] Simple JSON test result: rc={res.returncode}, stdout_len={len(res.stdout)}")
             
             if res.returncode == 0 and res.stdout:
                 try:
                     # Check if output is valid JSON
                     json.loads(res.stdout)
-                    print(f"[CLI Introspect] Simple JSON convention detected for {path}")
+                    # print(f"[CLI Introspect] Simple JSON convention detected for {path}")
                     
                     # Try to get detailed schema if available
                     schema = None
@@ -198,9 +198,9 @@ def sniff(path: Path, kind: str):
                             if isinstance(schema_data, dict) and "parameters" in schema_data:
                                 schema = schema_data["parameters"]
                                 desc = schema_data.get("description", "Simple JSON tool")
-                                print(f"[CLI Introspect] Got detailed schema for simple JSON tool: {len(schema.get('properties', {}))} properties")
+                                # print(f"[CLI Introspect] Got detailed schema for simple JSON tool: {len(schema.get('properties', {}))} properties")
                     except (json.JSONDecodeError, Exception):
-                        print(f"[CLI Introspect] Schema dump failed, using generic schema")
+                        # print(f"[CLI Introspect] Schema dump failed, using generic schema")
                         pass
                     
                     # Fallback to generic schema if detailed schema not available
@@ -241,59 +241,59 @@ def sniff(path: Path, kind: str):
                     
                     return schema, desc, simple_runner
                 except json.JSONDecodeError:
-                    print(f"[CLI Introspect] Simple JSON test failed - output not JSON")
+                    # print(f"[CLI Introspect] Simple JSON test failed - output not JSON")
                     pass
         except Exception as e:
-            print(f"[CLI Introspect] Simple JSON test exception: {e}")
+            # print(f"[CLI Introspect] Simple JSON test exception: {e}")
             pass
         
         # 1) Try multi-schema dump
         try:
-            print(f"[CLI Introspect] Trying multi-schema dump for {path}")
+            # print(f"[CLI Introspect] Trying multi-schema dump for {path}")
             res = subprocess.run(
                 [sys.executable, str(path), "--fractalic-dump-multi-schema"],
                 capture_output=True, text=True, timeout=10, check=False
             )
-            print(f"[CLI Introspect] Multi-schema dump result: rc={res.returncode}, stdout_len={len(res.stdout)}, stderr={res.stderr[:100]}")
+            # print(f"[CLI Introspect] Multi-schema dump result: rc={res.returncode}, stdout_len={len(res.stdout)}, stderr={res.stderr[:100]}")
             if res.returncode == 0 and res.stdout:
                 try:
                     parsed = json.loads(res.stdout)
                     if isinstance(parsed, list):
-                        print(f"[CLI Introspect] Multi-schema dump successful: {len(parsed)} tools")
+                        # print(f"[CLI Introspect] Multi-schema dump successful: {len(parsed)} tools")
                         # Return the list of manifests (multi-tool)
                         return parsed, None, None
                 except json.JSONDecodeError:
-                    print(f"[CLI Introspect] Multi-schema JSON decode failed")
+                    # print(f"[CLI Introspect] Multi-schema JSON decode failed")
                     pass
         except Exception as e:
-            print(f"[CLI Introspect] Multi-schema dump exception: {e}")
+            # print(f"[CLI Introspect] Multi-schema dump exception: {e}")
             pass
         # 2) Fallback: single schema dump
         try:
-            print(f"[CLI Introspect] Trying single schema dump for {path}")
+            # print(f"[CLI Introspect] Trying single schema dump for {path}")
             res = subprocess.run(
                 [sys.executable, str(path), SCHEMA_DUMP_FLAG],
                 capture_output=True, text=True, timeout=10, check=False
             )
-            print(f"[CLI Introspect] Single schema dump result: rc={res.returncode}, stdout_len={len(res.stdout)}, stderr={res.stderr[:100]}")
+            # print(f"[CLI Introspect] Single schema dump result: rc={res.returncode}, stdout_len={len(res.stdout)}, stderr={res.stderr[:100]}")
             if res.returncode == 0 and res.stdout:
                 try:
                     parsed = json.loads(res.stdout)
                     if isinstance(parsed, list):
-                        print(f"[CLI Introspect] Single schema dump returned list: {len(parsed)} tools")
+                        # print(f"[CLI Introspect] Single schema dump returned list: {len(parsed)} tools")
                         # Return the list of manifests (multi-tool)
                         return parsed, None, None
                     params = parsed.get("parameters") if isinstance(parsed, dict) else None
                     desc = parsed.get("description") if isinstance(parsed, dict) else None
                     if params and desc is not None:
-                        print(f"[CLI Introspect] Single schema dump successful: {desc}")
+                        # print(f"[CLI Introspect] Single schema dump successful: {desc}")
                         runner = _make_runner([sys.executable, str(path)])
                         return params, desc, runner
                 except json.JSONDecodeError as e:
-                    print(f"[CLI Introspect] Single schema JSON decode failed: {e}")
+                    # print(f"[CLI Introspect] Single schema JSON decode failed: {e}")
                     pass
         except Exception as e:
-            print(f"[CLI Introspect] Single schema dump exception: {e}")
+            # print(f"[CLI Introspect] Single schema dump exception: {e}")
             pass
         # 3) Fallback: help text parsing (safer than argparse capture)
         try:
@@ -301,10 +301,10 @@ def sniff(path: Path, kind: str):
                                       capture_output=True, text=True, timeout=5).stdout
             props, req, desc = _from_help_text(help_txt)
         except subprocess.TimeoutExpired:
-            print(f"[CLI Introspect] Help command timed out for {path}, using minimal schema")
+            # print(f"[CLI Introspect] Help command timed out for {path}, using minimal schema")
             props, req, desc = {}, [], "(no description - help timed out)"
         except Exception as e:
-            print(f"[CLI Introspect] Help command failed for {path}: {e}, using minimal schema")
+            # print(f"[CLI Introspect] Help command failed for {path}: {e}, using minimal schema")
             props, req, desc = {}, [], "(no description - help failed)"
         
         schema = {"type": "object", "properties": props, "required": req}
