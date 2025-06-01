@@ -95,7 +95,21 @@ def _mask_key(key: str) -> str:
         return "*" * len(key)
     return key[:4] + "*" * (10) + key[-4:]
 
+def enable_rich_terminal_features():
+    """Comprehensive test function to check Rich terminal capabilities for xterm."""
+    # Force environment variables for maximum xterm compatibility
+    os.environ['TERM'] = 'xterm-256color'
+    os.environ['COLORTERM'] = 'truecolor'
+    os.environ['FORCE_COLOR'] = '1'
+    if 'NO_COLOR' in os.environ:
+        del os.environ['NO_COLOR']
+    
+    
+
 def main():
+    # Test Rich terminal capabilities first
+    enable_rich_terminal_features()
+    
     settings = load_settings()  # Load settings.toml once
     
     default_provider = settings.get('defaultProvider', 'openai')
@@ -132,7 +146,13 @@ def main():
         Config.API_KEY = api_key
         Config.DEFAULT_OPERATION = args.operation
 
-        console = Console()  # rich output manager
+        # Use same force settings as test function for consistency
+        console = Console(
+            force_terminal=True, 
+            force_interactive=True,
+            color_system="truecolor",
+            legacy_windows=False
+        )
 
         # show masked key and its source with icons
         masked = _mask_key(api_key)
