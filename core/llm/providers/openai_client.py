@@ -366,7 +366,11 @@ class liteclient:
                         # On error, propagate convo so far
                         raise self.LLMCallException(f"Completion error: {e}", partial_result="\n\n".join(convo)) from e
 
-                self.ui.show("assistant", content or "[tool call]")
+                # DEBUG: Show stream value at print point
+                # self.ui.show("status", f"[DEBUG] stream={stream}")
+                # Only print the assistant block if neither the stream argument nor params['stream'] is True
+                if not (stream or params.get("stream")):
+                    self.ui.show("assistant", content or "[tool call]")
                 convo.append(content or "")
                 hist.append({"role": "assistant",
                              "content": content,
