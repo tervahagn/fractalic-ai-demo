@@ -202,58 +202,36 @@ class Child:
         self.stderr_buffer = []  # List of dicts: {"timestamp": str, "line": str}
         self.last_output_renewal = None  # ISO8601 string of last output change
         self._output_buffer_limit = 1000  # Max lines to keep per buffer
+        # --- Output capture tasks ---
+        self._stdout_task = None
+        self._stderr_task = None
         # --- Caching for tools_info ---
         self._last_tools_list = None
         self._last_token_count = None
         self._last_schema_json = None
 
     async def start(self):
-        if self.state == "running": return
-        self.state = "starting"; self.retries = 0
-        startup_delay = int(self.spec.get("env", {}).get("STARTUP_DELAY", "0"))
-        if startup_delay > 0:
-            log(f"Waiting {startup_delay}ms for {self.name} to initialize...")
-            await asyncio.sleep(startup_delay / 1000)
-        await self._spawn_if_needed()
-        retry_count = int(self.spec.get("env", {}).get("RETRY_COUNT", "3"))
-        retry_delay = int(self.spec.get("env", {}).get("RETRY_DELAY", "2000")) / 1000
-        for attempt in range(retry_count):
-            try:
-                tools = await asyncio.wait_for(self.list_tools(), timeout=10)
-                if tools and not isinstance(tools, dict) or "error" not in tools:
-                    log(f"{self.name} tools available after {attempt + 1} attempts")
-                    self.state = "running"
-                    self.healthy = True
-                    return
-            except Exception as e:
-                log(f"Attempt {attempt + 1} failed for {self.name}: {e}")
-            if attempt < retry_count - 1:
-                await asyncio.sleep(retry_delay)
-        # If we reach here, all attempts failed: kill process, mark errored
-        log(f"{self.name} failed to expose tools after {retry_count} attempts, killing process and marking as errored.")
-        await self._close_session()
-        if self.proc:
-            try:
-                log(f"Killing {self.name} (pid {self.pid}) after failed tool exposure.")
-                self.proc.kill()
-                await asyncio.wait_for(self.proc.wait(), timeout=5)
-            except Exception as kill_exc:
-                log(f"Kill failed for {self.name}: {kill_exc}")
-            if self.pid:
-                try:
-                    import signal
-                    log(f"Trying os.kill on {self.name} (pid {self.pid}) after failed tool exposure.")
-                    os.kill(self.pid, signal.SIGKILL)
-                except Exception as oskill_exc:
-                    log(f"os.kill failed for {self.name}: {oskill_exc}")
-        self.proc, self.pid = None, None
-        self.state = "errored"
-        self.last_error = f"Failed to get tools after {retry_count} attempts"
-        log(f"{self.name} is now marked as errored and will not be restarted.")
-        return  # Always return so supervisor can proceed
+        await self._cmd_q.put(("start",))
 
     async def stop(self):
         await self._cmd_q.put(("stop",))
+        
+    async def cleanup(self):
+        """Comprehensive cleanup of all resources."""
+        # Cancel the main loop
+        if self._runner and not self._runner.done():
+            self._runner.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._runner
+                
+        # Stop the child
+        await self._do_stop()
+        
+        # Clear buffers
+        self.stdout_buffer.clear()
+        self.stderr_buffer.clear()
+        
+        log(f"{self.name}: Cleanup complete")
 
     async def _loop(self):
         while True:
@@ -269,26 +247,103 @@ class Child:
     async def _do_start(self):
         if self.state == "running":
             return
+        
+        self.state = "starting"
+        self.retries = 0
+        
         try:
+            # Handle startup delay
+            startup_delay = int(self.spec.get("env", {}).get("STARTUP_DELAY", "0"))
+            if startup_delay > 0:
+                log(f"Waiting {startup_delay}ms for {self.name} to initialize...")
+                await asyncio.sleep(startup_delay / 1000)
+            
+            # Spawn process if needed
             await self._spawn_if_needed()
-            await self._ensure_session(force=True)
+            
+            # Try to establish session with retries
+            retry_count = int(self.spec.get("env", {}).get("RETRY_COUNT", "3"))
+            retry_delay = int(self.spec.get("env", {}).get("RETRY_DELAY", "2000")) / 1000
+            
+            for attempt in range(retry_count):
+                try:
+                    await self._ensure_session(force=True)
+                    # Test session by listing tools
+                    tools = await asyncio.wait_for(self.list_tools(), timeout=15)
+                    if tools and (not isinstance(tools, dict) or "error" not in tools):
+                        log(f"{self.name} tools available after {attempt + 1} attempts")
+                        break
+                except Exception as e:
+                    log(f"Attempt {attempt + 1} failed for {self.name}: {e}")
+                    await self._close_session()
+                    if attempt < retry_count - 1:
+                        await asyncio.sleep(retry_delay)
+            else:
+                # All attempts failed
+                raise Exception(f"Failed to get tools after {retry_count} attempts")
+            
+            # Start health monitoring
             self._health = asyncio.create_task(self._health_loop())
-            self.state   = "running"
+            self.state = "running"
+            self.healthy = True
             log(f"{self.name} ↑ ({self.transport})")
+            
         except Exception as e:
             self.state = "errored"
+            self.last_error = str(e)
             log(f"{self.name} failed to start: {e}")
-            await self._schedule_retry()
+            
+            # Clean up failed startup
+            await self._close_session()
+            if self.proc:
+                try:
+                    log(f"Killing {self.name} (pid {self.pid}) after failed startup.")
+                    self.proc.kill()
+                    await asyncio.wait_for(self.proc.wait(), timeout=5)
+                except Exception as kill_exc:
+                    log(f"Kill failed for {self.name}: {kill_exc}")
+                
+                if self.pid:
+                    try:
+                        import signal
+                        log(f"Trying os.kill on {self.name} (pid {self.pid}) after failed startup.")
+                        os.kill(self.pid, signal.SIGKILL)
+                    except Exception as oskill_exc:
+                        log(f"os.kill failed for {self.name}: {oskill_exc}")
+                
+            self.proc, self.pid = None, None
+            
+            # Don't retry automatically - let supervisor handle retries
+            log(f"{self.name} is now marked as errored.")
 
     async def _do_stop(self):
         if self.state == "stopped":
             return
         self.state = "stopping"
+        
+        # Cancel health check first
         if self._health:
             self._health.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._health
+        
+        # Cancel output capture tasks
+        if self._stdout_task:
+            self._stdout_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._stdout_task
+            self._stdout_task = None
+            
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._stderr_task
+            self._stderr_task = None
+        
+        # Close session
         await self._close_session()
+        
+        # Terminate process
         if self.proc:
             try:
                 self.proc.terminate()
@@ -299,15 +354,27 @@ class Child:
                     await self.proc.wait()
                 except ProcessLookupError:
                     pass  # Process already gone
+            
+            # Explicitly close pipes
             for pipe in [self.proc.stdin, self.proc.stdout, self.proc.stderr]:
                 if pipe:
                     try:
+                        # Check if pipe is already closed using a safer method
+                        if hasattr(pipe, 'is_closing') and pipe.is_closing():
+                            continue
                         pipe.close()
+                        # Wait for pipe to actually close
+                        if hasattr(pipe, 'wait_closed'):
+                            await pipe.wait_closed()
                     except Exception:
                         pass
+        
         self.proc, self.pid = None, None
         self.state          = "stopped"
+        self.healthy        = False
+        self.session_at     = 0.0  # Invalidate session timestamp
         log(f"{self.name} ↓")
+        
         if self._runner:
             self._runner.cancel()
 
@@ -337,109 +404,174 @@ class Child:
             import datetime
             def iso_now():
                 return datetime.datetime.now().isoformat()
+                
             async def capture_output(stream, buffer, stream_name):
-                while True:
-                    line = await stream.readline()
-                    if not line:
-                        break
-                    decoded = line.decode('utf-8', errors='replace').rstrip('\n')
-                    entry = {"timestamp": iso_now(), "line": decoded}
-                    buffer.append(entry)
-                    # Limit buffer size
-                    if len(buffer) > self._output_buffer_limit:
-                        del buffer[0:len(buffer)-self._output_buffer_limit]
-                    self.last_output_renewal = entry["timestamp"]
-                    # Add prefix with process name, stream, and timestamp
-                    print(f"[{entry['timestamp']}] [{self.name} {stream_name}] {decoded}")
-                    log(f"{self.name} {stream_name}: {decoded}")
+                try:
+                    while True:
+                        if not stream or stream.at_eof():
+                            break
+                        line = await stream.readline()
+                        if not line:
+                            break
+                        decoded = line.decode('utf-8', errors='replace').rstrip('\n')
+                        entry = {"timestamp": iso_now(), "line": decoded}
+                        buffer.append(entry)
+                        # Limit buffer size
+                        if len(buffer) > self._output_buffer_limit:
+                            del buffer[0:len(buffer)-self._output_buffer_limit]
+                        self.last_output_renewal = entry["timestamp"]
+                        # Add prefix with process name, stream, and timestamp
+                        print(f"[{entry['timestamp']}] [{self.name} {stream_name}] {decoded}")
+                        log(f"{self.name} {stream_name}: {decoded}")
+                except asyncio.CancelledError:
+                    log(f"{self.name} {stream_name} capture cancelled")
+                    raise
+                except Exception as e:
+                    log(f"{self.name} {stream_name} capture error: {e}")
             
-            asyncio.create_task(capture_output(self.proc.stdout, self.stdout_buffer, 'stdout'))
-            asyncio.create_task(capture_output(self.proc.stderr, self.stderr_buffer, 'stderr'))
+            # Start capture tasks
+            self._stdout_task = asyncio.create_task(capture_output(self.proc.stdout, self.stdout_buffer, 'stdout'))
+            self._stderr_task = asyncio.create_task(capture_output(self.proc.stderr, self.stderr_buffer, 'stderr'))
             
         except Exception as e:
             log(f"Error spawning {self.name}: {e}")
             raise
 
     async def _ensure_session(self, force=False):
+        # Check if current session is still valid
         if (not force and self.session
-                and time.time() - self.session_at < SESSION_TTL):
-            return
+                and time.time() - self.session_at < SESSION_TTL
+                and self.healthy):  # Only reuse if healthy
+            try:
+                # Quick health check on existing session
+                await asyncio.wait_for(self.session.list_tools(), timeout=5)
+                return  # Session is good, reuse it
+            except Exception as e:
+                log(f"{self.name}: Session health check failed: {e}, creating new session")
+                force = True  # Force new session creation
+                
         await self._close_session()
         self._exit_stack = contextlib.AsyncExitStack()
-        if self.transport == "http":
-            # Check if this is an SSE endpoint (generic detection based on URL path)
-            if self.spec["url"].endswith("/sse"):
-                # Use SSE client for SSE endpoints (returns only read_stream, write_stream)
-                read_stream, write_stream = await self._exit_stack.enter_async_context(
-                    sse_client(self.spec["url"])
+        
+        try:
+            if self.transport == "http":
+                # Check if this is an SSE endpoint (generic detection based on URL path)
+                if "/sse" in self.spec["url"]:
+                    # Use SSE client for SSE endpoints (returns only read_stream, write_stream)
+                    read_stream, write_stream = await self._exit_stack.enter_async_context(
+                        sse_client(self.spec["url"])
+                    )
+                else:
+                    # Use streamable HTTP client for other HTTP services (returns read_stream, write_stream, _)
+                    read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+                        streamablehttp_client(self.spec["url"])
+                    )
+                self.session = await self._exit_stack.enter_async_context(
+                    ClientSession(
+                        read_stream,
+                        write_stream,
+                        client_info={"name": "Fractalic MCP Manager", "version": "0.3.0"},
+                    )
                 )
             else:
-                # Use streamable HTTP client for other HTTP services (returns read_stream, write_stream, _)
-                read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
-                    streamablehttp_client(self.spec["url"])
+                stdio_ctx = stdio_client(StdioServerParameters(
+                    command=self.spec["command"],
+                    args=self.spec.get("args", []),
+                    env=self.spec.get("env", {})
+                ))
+                transport = await self._exit_stack.enter_async_context(stdio_ctx)
+                self.session = await self._exit_stack.enter_async_context(
+                    ClientSession(*transport)
                 )
-            self.session = await self._exit_stack.enter_async_context(
-                ClientSession(
-                    read_stream,
-                    write_stream,
-                    client_info={"name": "Fractalic MCP Manager", "version": "0.3.0"},
-                )
-            )
-        else:
-            stdio_ctx = stdio_client(StdioServerParameters(
-                command=self.spec["command"],
-                args=self.spec.get("args", []),
-                env=self.spec.get("env", {})
-            ))
-            transport = await self._exit_stack.enter_async_context(stdio_ctx)
-            self.session = await self._exit_stack.enter_async_context(
-                ClientSession(*transport)
-            )
-        # Mandatory MCP handshake with timeout
-        try:
-            # Add timeout specifically for session initialization to debug Zapier issues
-            init_timeout = 30  # seconds
-            log(f"{self.name}: Starting MCP session initialization (timeout: {init_timeout}s)")
-            await asyncio.wait_for(self.session.initialize(), timeout=init_timeout)
-            log(f"{self.name}: MCP session initialization completed successfully")
-        except asyncio.TimeoutError:
-            error_msg = f"MCP session initialization timed out after {init_timeout}s"
-            log(f"{self.name}: {error_msg}")
-            self.last_error = error_msg
-            raise Exception(error_msg)
+            
+            # Mandatory MCP handshake with timeout
+            try:
+                # Add timeout specifically for session initialization to debug Zapier issues
+                init_timeout = 30  # seconds
+                log(f"{self.name}: Starting MCP session initialization (timeout: {init_timeout}s)")
+                await asyncio.wait_for(self.session.initialize(), timeout=init_timeout)
+                log(f"{self.name}: MCP session initialization completed successfully")
+            except asyncio.TimeoutError:
+                error_msg = f"MCP session initialization timed out after {init_timeout}s"
+                log(f"{self.name}: {error_msg}")
+                self.last_error = error_msg
+                raise Exception(error_msg)
+            except Exception as e:
+                error_msg = f"MCP session initialization failed: {e}"
+                log(f"{self.name}: {error_msg}")
+                self.last_error = error_msg
+                raise
+            
+            self.session_at = time.time()
+            self.started_at = self.started_at or self.session_at
+            self.healthy = True               # Mark as healthy after successful handshake
+            
         except Exception as e:
-            error_msg = f"MCP session initialization failed: {e}"
-            log(f"{self.name}: {error_msg}")
-            self.last_error = error_msg
+            # Clean up on failure
+            await self._close_session()
             raise
-        
-        self.session_at = time.time()
-        self.started_at = self.started_at or self.session_at
-        self.healthy = True               # Mark as healthy after successful handshake
 
     async def _close_session(self):
-        if self._exit_stack:
-            with contextlib.suppress(Exception):
-                await self._exit_stack.aclose()
-        self.session, self._exit_stack = None, None
+        """Close the session and cleanup all resources properly."""
+        try:
+            if self.session:
+                # Try to close the session gracefully
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self.session.close(), timeout=5.0)
+                    
+            if self._exit_stack:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self._exit_stack.aclose(), timeout=5.0)
+                    
+        except Exception as e:
+            log(f"{self.name}: Error during session cleanup: {e}")
+        finally:
+            # Always reset these regardless of errors
+            self.session = None
+            self._exit_stack = None
+            self.session_at = 0.0
+            self.healthy = False
 
     async def _health_loop(self):
         while True:
             try:
                 await asyncio.sleep(HEALTH_INT)
+                
+                # Skip health check if already stopping/stopped
+                if self.state in ["stopping", "stopped", "errored"]:
+                    break
+                    
                 await self._ensure_session()
                 await asyncio.wait_for(self.session.list_tools(), timeout=TIMEOUT_INITIAL / 3)
                 self.healthy = True        # Mark as healthy after successful tool list
                 self.health_failures = 0   # Reset on success
+                
             except asyncio.CancelledError:
+                log(f"{self.name}: Health check cancelled")
                 break
             except Exception as e:
                 self.healthy = False       # Mark as unhealthy before retry
-                self.last_error = str(e)   # Store the error message
+                error_msg = str(e) if str(e) else "Unknown health check error"
+                self.last_error = error_msg   # Store the error message
                 self.health_failures += 1
-                log(f"{self.name} unhealthy: {e} (failure {self.health_failures})")
+                log(f"{self.name} unhealthy: {error_msg} (failure {self.health_failures})")
+                
                 if self.health_failures >= 2:
                     log(f"{self.name} failed health check twice, killing process and marking as errored.")
+                    
+                    # Cancel output capture tasks first
+                    if self._stdout_task:
+                        self._stdout_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await self._stdout_task
+                        self._stdout_task = None
+                        
+                    if self._stderr_task:
+                        self._stderr_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await self._stderr_task
+                        self._stderr_task = None
+                    
                     await self._close_session()
                     if self.proc:
                         try:
@@ -464,11 +596,37 @@ class Child:
                     break
 
     async def _schedule_retry(self):
+        # Cancel output capture tasks before retry
+        if self._stdout_task:
+            self._stdout_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._stdout_task
+            self._stdout_task = None
+            
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._stderr_task
+            self._stderr_task = None
+            
         await self._close_session()
         if self.proc:
             with contextlib.suppress(Exception):
                 self.proc.kill()
                 await self.proc.wait()
+                # Close pipes explicitly
+                for pipe in [self.proc.stdin, self.proc.stdout, self.proc.stderr]:
+                    if pipe:
+                        try:
+                            # Check if pipe is already closed using a safer method
+                            if hasattr(pipe, 'is_closing') and pipe.is_closing():
+                                continue
+                            pipe.close()
+                            if hasattr(pipe, 'wait_closed'):
+                                await pipe.wait_closed()
+                        except Exception:
+                            pass
+                            
         if self.retries >= MAX_RETRY:
             self.state = "errored"
             log(f"{self.name} exceeded retries → errored")
@@ -482,14 +640,23 @@ class Child:
         await self._do_start()
 
     async def list_tools(self):
-        await self._ensure_session()
-        return await asyncio.wait_for(self.session.list_tools(), TIMEOUT_INITIAL)
+        try:
+            await self._ensure_session()
+            return await asyncio.wait_for(self.session.list_tools(), TIMEOUT_INITIAL)
+        except Exception as e:
+            error_msg = f"Failed to list tools: {str(e) if str(e) else 'Unknown error'}"
+            self.last_error = error_msg
+            log(f"{self.name}: {error_msg}")
+            # Invalidate session on error
+            self.session_at = 0.0
+            self.healthy = False
+            raise
 
     async def call_tool(self, tool: str, args: dict):
-        await self._ensure_session()
-        
-        log(f"{self.name}: Calling tool '{tool}' with timeout {TIMEOUT_INITIAL}s")
         try:
+            await self._ensure_session()
+            
+            log(f"{self.name}: Calling tool '{tool}' with timeout {TIMEOUT_INITIAL}s")
             result = await asyncio.wait_for(
                 self.session.call_tool(tool, args), TIMEOUT_INITIAL)
             log(f"{self.name}: Tool '{tool}' completed successfully")
@@ -497,9 +664,18 @@ class Child:
         except asyncio.TimeoutError as e:
             error_msg = f"Tool '{tool}' timed out after {TIMEOUT_INITIAL}s"
             log(f"{self.name}: {error_msg}")
+            self.last_error = error_msg
+            # Invalidate session on timeout
+            self.session_at = 0.0
+            self.healthy = False
             raise Exception(error_msg) from e
         except Exception as e:
-            log(f"{self.name}: Tool '{tool}' failed: {e}")
+            error_msg = f"Tool '{tool}' failed: {str(e) if str(e) else 'Unknown error'}"
+            log(f"{self.name}: {error_msg}")
+            self.last_error = error_msg
+            # Invalidate session on error
+            self.session_at = 0.0
+            self.healthy = False
             raise
     
     def info(self):
@@ -548,15 +724,43 @@ class Supervisor:
     async def start(self, tgt):
         if tgt == "all":
             # Launch all children as background tasks so API can start even if some fail
+            startup_tasks = []
             for c in self.children.values():
-                asyncio.create_task(c.start())
+                task = asyncio.create_task(c.start())
+                startup_tasks.append(task)
+            
+            # Don't wait for all to complete, just fire and forget
+            # The API should be available even if some servers fail to start
+            log(f"Started {len(startup_tasks)} MCP servers in background")
+            
         else:
             c = self.children.get(tgt)
             if not c: raise web.HTTPNotFound(text=f"{tgt} unknown")
             await c.start()
 
     async def stop(self, tgt):
-        await self._each("stop", tgt)
+        if tgt == "all":
+            # Stop all children with proper cleanup
+            cleanup_tasks = []
+            for c in self.children.values():
+                cleanup_tasks.append(c.cleanup())
+            if cleanup_tasks:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+        else:
+            c = self.children.get(tgt)
+            if not c: 
+                raise web.HTTPNotFound(text=f"{tgt} unknown")
+            await c.cleanup()
+    
+    async def stop_local_only(self):
+        """Stop only local stdio servers, skip remote HTTP servers."""
+        local_children = [c for c in self.children.values() if c.transport == "stdio"]
+        if local_children:
+            log(f"Stopping {len(local_children)} local servers: {[c.name for c in local_children]}")
+            cleanup_tasks = [c.cleanup() for c in local_children]
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+        else:
+            log("No local servers to stop")
 
     async def status(self):
         # Gather base info
@@ -574,7 +778,9 @@ class Supervisor:
         out = {}
         for n, c in self.children.items():
             if c.state != "running":
-                out[n] = {"error": f"MCP state is {c.state}", "tools": []}
+                # Provide more specific error messages
+                error_detail = c.last_error or f"MCP state is {c.state}"
+                out[n] = {"error": error_detail, "tools": []}
                 continue
             try:
                 tl = await c.list_tools()
@@ -586,8 +792,11 @@ class Supervisor:
                     sanitized_tools = tools_list  # No sanitization
                 out[n] = {"tools": sanitized_tools}
             except Exception as e:
-                log(f"Error getting tools from {n}: {e}")
-                out[n] = {"error": str(e) or f"Unknown error from {n}", "tools": []}
+                error_msg = str(e) if str(e) else f"Unknown error from {n}"
+                log(f"Error getting tools from {n}: {error_msg}")
+                out[n] = {"error": error_msg, "tools": []}
+                # Store the error for future reference
+                c.last_error = error_msg
         return out
 
     async def call_tool(self, name: str, args: Dict[str, Any]):
@@ -661,10 +870,19 @@ async def _call(req, sup):
     return web.json_response(res, dumps=lambda obj: json.dumps(obj, cls=MCPEncoder))
 
 async def _kill(req, sup: Supervisor, stop_ev: asyncio.Event):
-    # 1) stop all child servers
-    await sup.stop("all")
-    # 2) tell the main loop in run_serve() to exit
-    stop_ev.set()
+    # Respond immediately, then trigger shutdown asynchronously
+    async def delayed_shutdown():
+        # Small delay to ensure response is sent
+        await asyncio.sleep(0.1)
+        # 1) stop only local stdio servers (faster, safer)
+        await sup.stop_local_only()
+        # 2) tell the main loop in run_serve() to exit
+        stop_ev.set()
+    
+    # Start shutdown in background
+    asyncio.create_task(delayed_shutdown())
+    
+    # Return response immediately
     return web.json_response({"status": "shutting-down"}, dumps=lambda obj: json.dumps(obj, cls=MCPEncoder))
 
 # ==================================================================== runners
@@ -684,10 +902,26 @@ async def run_serve(port: int):
 
     await stop_ev.wait()
     log("shutting down …")
-    await sup.stop("all"); await runner.cleanup()
-    await asyncio.sleep(0.1)  # Give time for all async cleanup
-    gc.collect()              # Force garbage collection
-    await asyncio.sleep(0.1)  # Allow any finalizers to run
+    
+    # Improved shutdown sequence
+    try:
+        # Stop local servers only with shorter timeout (faster kill)
+        await asyncio.wait_for(sup.stop_local_only(), timeout=10.0)
+        
+        # Clean up the web runner
+        await runner.cleanup()
+        
+        # Give time for async cleanup with shorter intervals
+        for i in range(3):
+            await asyncio.sleep(0.1)
+            gc.collect()
+            
+    except asyncio.TimeoutError:
+        log("Warning: Shutdown timed out, forcing exit")
+    except Exception as e:
+        log(f"Warning: Error during shutdown: {e}")
+    
+    log("Shutdown complete")
 
 async def client_call(port: int, verb: str, tgt: Optional[str] = None):
     url = f"http://127.0.0.1:{port}"
