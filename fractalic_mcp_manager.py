@@ -39,6 +39,7 @@ class ServiceProfile:
         # Classify service characteristics
         self.is_external = self._detect_external_service()
         self.is_third_party_api = self._detect_third_party_api()
+        self.is_high_activity = self._detect_high_activity_service()
         self.complexity_level = self._assess_complexity()
         
         # Apply adaptive settings
@@ -46,6 +47,7 @@ class ServiceProfile:
         self.retry_count = self._calculate_retry_count()
         self.health_failure_limit = self._calculate_health_failure_limit()
         self.max_retries = self._calculate_max_retries()
+        self.tool_request_cooldown = self._calculate_tool_request_cooldown()
     
     def _detect_external_service(self) -> bool:
         """Detect if this is an external service that might be unreliable"""
@@ -81,6 +83,18 @@ class ServiceProfile:
         
         return not any(indicator in url for indicator in internal_indicators)
     
+    def _detect_high_activity_service(self) -> bool:
+        """Detect services known to make frequent/excessive requests"""
+        # Known high-activity services that generate frequent tool requests
+        high_activity_services = [
+            "desktop-commander",  # Generates tools list repeatedly
+            "playwright-mcp",     # May generate many browser-related tools
+            "automation-server"   # General automation services tend to be chatty
+        ]
+        
+        # Check if service name matches any known high-activity services
+        return any(service_name in self.name.lower() for service_name in high_activity_services)
+
     def _assess_complexity(self) -> str:
         """Assess service complexity: 'simple', 'medium', 'complex'"""
         # Check for complexity indicators
@@ -101,6 +115,10 @@ class ServiceProfile:
         # Check for environment complexity (many env vars = more complex setup)
         env_vars = self.spec.get("env", {})
         if len(env_vars) > 3:
+            complexity_indicators += 1
+        
+        # High-activity services add complexity due to rate limiting needs
+        if self.is_high_activity:
             complexity_indicators += 1
             
         # Classify based on indicators
@@ -163,6 +181,15 @@ class ServiceProfile:
             base_retries += 1  # HTTP services might need more retries
             
         return base_retries
+    
+    def _calculate_tool_request_cooldown(self) -> float:
+        """Calculate cooldown period between tool requests to prevent spam"""
+        if self.is_high_activity:
+            return 2.0  # 2 second cooldown for high-activity services
+        elif self.complexity_level == "complex":
+            return 1.0  # 1 second cooldown for complex services
+        else:
+            return 0.5  # 0.5 second cooldown for normal services
 
 # -------------------------------------------------------------------- constants
 CONF_PATH    = Path(__file__).parent / "mcp_servers.json"
@@ -336,6 +363,7 @@ class Child:
         self.healthy     = False          # Track liveness separately from readiness
         self.restart_count = 0            # Track total number of restarts
         self.last_error   = None          # Store last error message
+        self.last_tool_request = 0.0      # Track last tool request time for rate limiting
         self.health_failures = 0          # Track consecutive health check failures
         self.last_restart_time = 0        # Track when last restart occurred
         # --- New fields for output capture ---
@@ -946,8 +974,24 @@ class Child:
             raise
 
     async def tools(self):
-        """Get tools with caching to reduce repeated list_tools() calls."""
+        """Get tools with caching and rate limiting to reduce repeated list_tools() calls."""
         try:
+            # Apply rate limiting for high-activity services
+            current_time = time.time()
+            time_since_last_request = current_time - self.last_tool_request
+            if time_since_last_request < self.profile.tool_request_cooldown:
+                # Return cached tools if we're in cooldown period
+                if hasattr(self, '_cached_tools') and self._cached_tools:
+                    log(f"{self.name}: Rate limited tool request, returning cached tools")
+                    return self._cached_tools
+                else:
+                    # If no cache but in cooldown, wait for cooldown to expire
+                    sleep_time = self.profile.tool_request_cooldown - time_since_last_request
+                    log(f"{self.name}: Rate limiting tool request, waiting {sleep_time:.1f}s")
+                    await asyncio.sleep(sleep_time)
+            
+            self.last_tool_request = time.time()
+            
             # Check if cached tools are available and recent (within 5 minutes for better resilience)
             cache_timeout = 300  # 5 minutes to reduce repeated calls during health check cycles
             if (hasattr(self, '_cached_tools') and self._cached_tools and 
