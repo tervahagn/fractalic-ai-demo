@@ -528,14 +528,30 @@ async def run_fractalic(request: Request):
 
     return StreamingResponse(stream_fractalic(), media_type="text/plain")
 
+# Cache for tools schema to avoid recreating ToolRegistry repeatedly
+_tools_schema_cache = {}
+_SCHEMA_CACHE_DURATION = 30  # Cache for 30 seconds
+
 @app.get("/tools_schema/")
 async def tools_schema(tools_dir: str = Query("tools", description="Path to the tools directory")):
     """
     Autodiscover tools from the specified tools_dir and return their schema in OpenAI/MCP-compatible JSON format.
     """
     try:
+        import time
+        current_time = time.time()
+        
+        # Check if we have a cached schema for this tools_dir
+        cache_key = tools_dir
+        if cache_key in _tools_schema_cache:
+            cached_schema, timestamp = _tools_schema_cache[cache_key]
+            if current_time - timestamp < _SCHEMA_CACHE_DURATION:
+                return JSONResponse(content=cached_schema)
+        
+        # Generate fresh schema and cache it
         registry = ToolRegistry(tools_dir=tools_dir)
         schema = registry.generate_schema()
+        _tools_schema_cache[cache_key] = (schema, current_time)
         return JSONResponse(content=schema)
     except Exception as e:
         return JSONResponse(status_code=500, content={"detail": f"Internal Server Error: {str(e)}"})

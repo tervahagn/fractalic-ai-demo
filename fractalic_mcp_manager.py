@@ -197,6 +197,7 @@ class Child:
         self.restart_count = 0            # Track total number of restarts
         self.last_error   = None          # Store last error message
         self.health_failures = 0          # Track consecutive health check failures
+        self.last_restart_time = 0        # Track when last restart occurred
         # --- New fields for output capture ---
         self.stdout_buffer = []  # List of dicts: {"timestamp": str, "line": str}
         self.stderr_buffer = []  # List of dicts: {"timestamp": str, "line": str}
@@ -209,6 +210,9 @@ class Child:
         self._last_tools_list = None
         self._last_token_count = None
         self._last_schema_json = None
+        # --- Tools caching ---
+        self._cached_tools = None
+        self._tools_cache_time = 0
 
     async def start(self):
         await self._cmd_q.put(("start",))
@@ -262,25 +266,44 @@ class Child:
             await self._spawn_if_needed()
             
             # Try to establish session with retries
-            retry_count = int(self.spec.get("env", {}).get("RETRY_COUNT", "3"))
+            # Use higher retry count for external HTTP services which can be flaky
+            base_retry_count = int(self.spec.get("env", {}).get("RETRY_COUNT", "3"))
+            if self.transport == "http" and "zapier.com" in self.spec.get("url", ""):
+                retry_count = max(base_retry_count, 5)  # At least 5 retries for Zapier
+            elif self.transport == "http":
+                retry_count = max(base_retry_count, 4)  # At least 4 retries for other HTTP services
+            else:
+                retry_count = base_retry_count  # Use default for stdio services
+                
             retry_delay = int(self.spec.get("env", {}).get("RETRY_DELAY", "2000")) / 1000
             
             for attempt in range(retry_count):
                 try:
                     await self._ensure_session(force=True)
-                    # Test session by listing tools
-                    tools = await asyncio.wait_for(self.list_tools(), timeout=15)
+                    # Test session by getting cached tools (avoids repeated list_tools calls)
+                    tools = await asyncio.wait_for(self.tools(), timeout=15)
                     if tools and (not isinstance(tools, dict) or "error" not in tools):
                         log(f"{self.name} tools available after {attempt + 1} attempts")
                         break
                 except Exception as e:
-                    log(f"Attempt {attempt + 1} failed for {self.name}: {e}")
+                    error_msg = str(e)
+                    if "500 internal server error" in error_msg.lower() and self.transport == "http":
+                        log(f"Attempt {attempt + 1} failed for {self.name} (external service error): {e}")
+                        if "zapier.com" in self.spec.get("url", ""):
+                            log(f"{self.name}: This appears to be a temporary Zapier API issue, will retry...")
+                    else:
+                        log(f"Attempt {attempt + 1} failed for {self.name}: {e}")
                     await self._close_session()
                     if attempt < retry_count - 1:
-                        await asyncio.sleep(retry_delay)
+                        # Use longer delay for external service errors
+                        delay = retry_delay * 2 if "500 internal server error" in error_msg.lower() else retry_delay
+                        await asyncio.sleep(delay)
             else:
                 # All attempts failed
-                raise Exception(f"Failed to get tools after {retry_count} attempts")
+                if self.transport == "http" and "zapier.com" in self.spec.get("url", ""):
+                    raise Exception(f"Failed to connect to Zapier API after {retry_count} attempts. This is likely a temporary issue with Zapier's external service.")
+                else:
+                    raise Exception(f"Failed to get tools after {retry_count} attempts")
             
             # Start health monitoring
             self._health = asyncio.create_task(self._health_loop())
@@ -451,6 +474,8 @@ class Child:
             except Exception as e:
                 log(f"{self.name}: Session health check failed: {e}, creating new session")
                 force = True  # Force new session creation
+                # Mark this as a temporary reset to preserve cache
+                self._temporary_session_reset = True
                 
         await self._close_session()
         self._exit_stack = contextlib.AsyncExitStack()
@@ -488,8 +513,14 @@ class Child:
             
             # Mandatory MCP handshake with timeout
             try:
-                # Add timeout specifically for session initialization to debug Zapier issues
-                init_timeout = 30  # seconds
+                # Use longer timeout for external HTTP services like Zapier
+                if self.transport == "http" and "zapier.com" in self.spec.get("url", ""):
+                    init_timeout = 60  # 60 seconds for Zapier (external service)
+                elif self.transport == "http":
+                    init_timeout = 45  # 45 seconds for other HTTP services
+                else:
+                    init_timeout = 30  # 30 seconds for stdio services
+                    
                 log(f"{self.name}: Starting MCP session initialization (timeout: {init_timeout}s)")
                 await asyncio.wait_for(self.session.initialize(), timeout=init_timeout)
                 log(f"{self.name}: MCP session initialization completed successfully")
@@ -499,14 +530,26 @@ class Child:
                 self.last_error = error_msg
                 raise Exception(error_msg)
             except Exception as e:
-                error_msg = f"MCP session initialization failed: {e}"
-                log(f"{self.name}: {error_msg}")
-                self.last_error = error_msg
-                raise
+                # Check for specific HTTP errors from external services
+                error_str = str(e).lower()
+                if "500 internal server error" in error_str and self.transport == "http":
+                    error_msg = f"External service error (HTTP 500): {e}. This is likely a temporary issue with the external API."
+                    log(f"{self.name}: {error_msg}")
+                    self.last_error = error_msg
+                    # For external service errors, mark as retriable
+                    raise Exception(error_msg)
+                else:
+                    error_msg = f"MCP session initialization failed: {e}"
+                    log(f"{self.name}: {error_msg}")
+                    self.last_error = error_msg
+                    raise
             
             self.session_at = time.time()
             self.started_at = self.started_at or self.session_at
             self.healthy = True               # Mark as healthy after successful handshake
+            # Clear temporary reset flag after successful session establishment
+            if hasattr(self, '_temporary_session_reset'):
+                delattr(self, '_temporary_session_reset')
             
         except Exception as e:
             # Clean up on failure
@@ -546,14 +589,32 @@ class Child:
                 except Exception as e:
                     log(f"{self.name}: Error closing session: {e}")
                     
-            # Close exit stack with proper timeout and error handling
+            # Close exit stack with better error handling for cross-task issues
             if self._exit_stack:
                 try:
-                    await asyncio.wait_for(self._exit_stack.aclose(), timeout=3.0)
+                    # Store reference and clear immediately to prevent cross-task access
+                    exit_stack = self._exit_stack
+                    self._exit_stack = None
+                    
+                    # Wrap in shield to prevent cancellation during cleanup
+                    await asyncio.shield(
+                        asyncio.wait_for(exit_stack.aclose(), timeout=5.0)
+                    )
                 except asyncio.TimeoutError:
                     log(f"{self.name}: Exit stack close timed out")
+                except asyncio.CancelledError:
+                    # Handle cancellation during close gracefully
+                    log(f"{self.name}: Exit stack close was cancelled")
                 except Exception as e:
-                    log(f"{self.name}: Error closing exit stack: {e}")
+                    # Suppress common asyncio context errors that don't affect functionality
+                    error_msg = str(e)
+                    if ("cancel scope" in error_msg or "different task" in error_msg or 
+                        "Attempted to exit cancel scope" in error_msg or
+                        "unhandled errors in a TaskGroup" in error_msg):
+                        # These are common async context errors that don't affect functionality
+                        pass  # Silently ignore these specific errors
+                    else:
+                        log(f"{self.name}: Error closing exit stack: {e}")
                     
         except Exception as e:
             log(f"{self.name}: Error during session cleanup: {e}")
@@ -564,13 +625,21 @@ class Child:
             self._stdout_task = None
             self._stderr_task = None
             self._health = None
-            # Clear cached tools on session close
-            self._cached_tools = None
-            self._tools_cache_time = 0
+            # Only clear cached tools if session was actually broken (not just a health check reset)
+            # Keep cache for temporary reconnections to reduce repeated tool list generation
+            if not hasattr(self, '_temporary_session_reset'):
+                self._cached_tools = None
+                self._tools_cache_time = 0
             self.session_at = 0.0
             self.healthy = False
 
     async def _health_loop(self):
+        # Give newly started processes more time before first health check
+        startup_delay = max(30, HEALTH_INT * 2)  # At least 30 seconds
+        await asyncio.sleep(startup_delay)
+        
+        consecutive_failures = 0
+        
         while True:
             try:
                 await asyncio.sleep(HEALTH_INT)
@@ -578,75 +647,112 @@ class Child:
                 # Skip health check if already stopping/stopped
                 if self.state in ["stopping", "stopped", "errored"]:
                     break
-                    
-                await self._ensure_session()
                 
-                # Always use cached tools() method to maintain consistent caching behavior
-                try:
-                    # Use our cached tools() method instead of direct session.list_tools()
-                    await asyncio.wait_for(self.tools(), timeout=TIMEOUT_INITIAL / 3)
-                    self.healthy = True        # Mark as healthy after successful health check
-                    self.health_failures = 0   # Reset on success
-                except Exception as e:
-                    # If cached tools() fails, try a simple ping as lightweight fallback
+                # Skip health check if recently restarted (give it time to stabilize)
+                if hasattr(self, 'restart_count') and self.restart_count > 0:
+                    time_since_restart = time.time() - getattr(self, 'last_restart_time', 0)
+                    if time_since_restart < 60:  # Wait 60 seconds after restart
+                        log(f"{self.name}: Skipping health check, recently restarted ({time_since_restart:.1f}s ago)")
+                        continue
+                
+                # Try lightweight health check first
+                health_ok = False
+                
+                # Check if server should be running
+                if self.transport == "http" or (self.proc and self.proc.returncode is None):
                     try:
-                        await asyncio.wait_for(self.session.ping(), timeout=5)
-                        self.healthy = True
-                        self.health_failures = 0
-                    except:
-                        # Both failed, mark as unhealthy
-                        raise e
+                        # If session exists, try a simple ping first
+                        if self.session and hasattr(self.session, 'ping'):
+                            await asyncio.wait_for(self.session.ping(), timeout=10)
+                            health_ok = True
+                        elif self.session:
+                            # If no ping available, try cached tools with longer timeout
+                            await asyncio.wait_for(self.tools(), timeout=15)
+                            health_ok = True
+                        else:
+                            # No session, try to establish one
+                            await self._ensure_session()
+                            health_ok = True
+                    except Exception as e:
+                        log(f"{self.name}: Health check failed: {e}")
+                        health_ok = False
+                elif self.transport == "stdio":
+                    log(f"{self.name}: Process is not running (returncode: {self.proc.returncode if self.proc else 'None'})")
+                    health_ok = False
+                else:
+                    # HTTP servers don't have processes, so we rely on session checks above
+                    health_ok = True
+                
+                if health_ok:
+                    self.healthy = True
+                    consecutive_failures = 0
+                    self.health_failures = 0  # Reset global counter too
+                else:
+                    self.healthy = False
+                    consecutive_failures += 1
+                    self.health_failures += 1
+                    
+                    # Be more lenient - require more failures before restarting
+                    if consecutive_failures >= 3:
+                        log(f"{self.name} failed health check {consecutive_failures} times consecutively")
+                        
+                        # Only restart if we haven't restarted too recently
+                        time_since_last_restart = time.time() - getattr(self, 'last_restart_time', 0)
+                        if time_since_last_restart < 120:  # Don't restart more than once every 2 minutes
+                            log(f"{self.name}: Skipping restart, last restart was {time_since_last_restart:.1f}s ago")
+                            consecutive_failures = 0  # Reset to prevent immediate retry
+                            continue
+                        
+                        # If we've had too many total failures, mark as errored
+                        # Be more tolerant for external HTTP services which can have temporary outages
+                        failure_limit = 10 if (self.transport == "http" and "zapier.com" in self.spec.get("url", "")) else 5
+                        if self.health_failures >= failure_limit:
+                            log(f"{self.name} exceeded health failure limit ({self.health_failures}/{failure_limit}), marking as errored")
+                            
+                            # Cancel output capture tasks first
+                            if self._stdout_task:
+                                self._stdout_task.cancel()
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    await self._stdout_task
+                                self._stdout_task = None
+                                
+                            if self._stderr_task:
+                                self._stderr_task.cancel()
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    await self._stderr_task
+                                self._stderr_task = None
+                            
+                            await self._close_session()
+                            if self.proc:
+                                try:
+                                    log(f"Attempting graceful kill of {self.name} (pid {self.pid})")
+                                    self.proc.kill()
+                                    await self.proc.wait()
+                                except Exception as kill_exc:
+                                    log(f"Graceful kill failed for {self.name}: {kill_exc}")
+                            self.proc, self.pid = None, None
+                            self.state = "errored"
+                            log(f"{self.name} is now marked as errored and will not be restarted.")
+                            break
+                        else:
+                            log(f"{self.name} scheduling restart due to health failures")
+                            await self._schedule_retry()
+                            break
+                    else:
+                        log(f"{self.name}: Health check failed ({consecutive_failures}/3), will retry")
                 
             except asyncio.CancelledError:
                 log(f"{self.name}: Health check cancelled")
                 break
             except Exception as e:
-                self.healthy = False       # Mark as unhealthy before retry
-                error_msg = str(e) if str(e) else "Unknown health check error"
-                self.last_error = error_msg   # Store the error message
-                self.health_failures += 1
-                log(f"{self.name} unhealthy: {error_msg} (failure {self.health_failures})")
-                
-                if self.health_failures >= 2:
-                    log(f"{self.name} failed health check twice, killing process and marking as errored.")
-                    
-                    # Cancel output capture tasks first
-                    if self._stdout_task:
-                        self._stdout_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await self._stdout_task
-                        self._stdout_task = None
-                        
-                    if self._stderr_task:
-                        self._stderr_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await self._stderr_task
-                        self._stderr_task = None
-                    
-                    await self._close_session()
-                    if self.proc:
-                        try:
-                            log(f"Attempting graceful kill of {self.name} (pid {self.pid})")
-                            self.proc.kill()
-                            await self.proc.wait()
-                        except Exception as kill_exc:
-                            log(f"Graceful kill failed for {self.name}: {kill_exc}")
-                        # Fallback: try os.kill if process still exists
-                        if self.pid:
-                            try:
-                                log(f"Trying os.kill on {self.name} (pid {self.pid})")
-                                os.kill(self.pid, signal.SIGKILL)
-                            except Exception as oskill_exc:
-                                log(f"os.kill failed for {self.name}: {oskill_exc}")
-                    self.proc, self.pid = None, None
-                    self.state = "errored"
-                    log(f"{self.name} is now marked as errored and will not be restarted.")
-                    break
-                else:
-                    await self._schedule_retry()
-                    break
+                log(f"{self.name}: Health check loop error: {e}")
+                # Don't break on unexpected errors, just continue
+                consecutive_failures += 1
 
     async def _schedule_retry(self):
+        # Track restart time
+        self.last_restart_time = time.time()
+        
         # Cancel output capture tasks before retry
         if self._stdout_task:
             self._stdout_task.cancel()
@@ -678,13 +784,21 @@ class Child:
                         except Exception:
                             pass
                             
-        if self.retries >= MAX_RETRY:
+        # Use higher retry limit for external HTTP services which can be flaky
+        max_retries = MAX_RETRY
+        if self.transport == "http" and "zapier.com" in self.spec.get("url", ""):
+            max_retries = 8  # More retries for Zapier due to external service flakiness
+        elif self.transport == "http":
+            max_retries = 6  # More retries for other HTTP services
+            
+        if self.retries >= max_retries:
             self.state = "errored"
-            log(f"{self.name} exceeded retries → errored")
+            log(f"{self.name} exceeded retries ({self.retries}/{max_retries}) → errored")
             return
+            
         self.retries += 1
-        backoff = BACKOFF_BASE ** self.retries
-        self.state   = "retrying"
+        backoff = min(BACKOFF_BASE ** self.retries, 60)  # Cap at 60 seconds
+        self.state = "retrying"
         log(f"{self.name} retrying in {backoff}s …")
         await asyncio.sleep(backoff)
         self.restart_count += 1           # Increment restart count before retry
@@ -706,9 +820,10 @@ class Child:
     async def tools(self):
         """Get tools with caching to reduce repeated list_tools() calls."""
         try:
-            # Check if cached tools are available and recent (within 30 seconds)
+            # Check if cached tools are available and recent (within 5 minutes for better resilience)
+            cache_timeout = 300  # 5 minutes to reduce repeated calls during health check cycles
             if (hasattr(self, '_cached_tools') and self._cached_tools and 
-                time.time() - getattr(self, '_tools_cache_time', 0) < 30):
+                time.time() - getattr(self, '_tools_cache_time', 0) < cache_timeout):
                 return self._cached_tools
             
             # Cache expired or doesn't exist, refresh it
@@ -732,6 +847,9 @@ class Child:
             error_msg = f"Failed to get tools: {str(e) if str(e) else 'Unknown error'}"
             self.last_error = error_msg
             log(f"{self.name}: {error_msg}")
+            # Clear temporary reset flag on real errors to ensure cache gets invalidated
+            if hasattr(self, '_temporary_session_reset'):
+                delattr(self, '_temporary_session_reset')
             # Invalidate session on error
             self.session_at = 0.0
             self.healthy = False
@@ -976,6 +1094,24 @@ async def _kill(req, sup: Supervisor, stop_ev: asyncio.Event):
 
 # ==================================================================== runners
 async def run_serve(port: int):
+    # Set up global exception handler for unhandled task exceptions
+    def exception_handler(loop, context):
+        exception = context.get('exception')
+        if exception:
+            error_msg = str(exception)
+            # Suppress common async context errors that don't affect functionality
+            if ("cancel scope" in error_msg or "different task" in error_msg or 
+                "Attempted to exit cancel scope" in error_msg or
+                "unhandled errors in a TaskGroup" in error_msg):
+                # These are common async context errors during shutdown - silently ignore
+                return
+        # Log other unhandled exceptions normally
+        loop.default_exception_handler(context)
+    
+    # Install the exception handler
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(exception_handler)
+    
     sup = Supervisor(); await sup.start("all")
     stop_ev = asyncio.Event()
     runner = web.AppRunner(build_app(sup, stop_ev)); await runner.setup()
