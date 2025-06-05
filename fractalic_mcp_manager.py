@@ -28,6 +28,142 @@ import tiktoken
 
 TOKENIZER = tiktoken.get_encoding("cl100k_base")
 
+# -------------------------------------------------------------------- Service Classification
+class ServiceProfile:
+    """Auto-detected service profile for adaptive timeout/retry settings"""
+    def __init__(self, name: str, spec: dict, transport: Transport):
+        self.name = name
+        self.spec = spec
+        self.transport = transport
+        
+        # Classify service characteristics
+        self.is_external = self._detect_external_service()
+        self.is_third_party_api = self._detect_third_party_api()
+        self.complexity_level = self._assess_complexity()
+        
+        # Apply adaptive settings
+        self.init_timeout = self._calculate_init_timeout()
+        self.retry_count = self._calculate_retry_count()
+        self.health_failure_limit = self._calculate_health_failure_limit()
+        self.max_retries = self._calculate_max_retries()
+    
+    def _detect_external_service(self) -> bool:
+        """Detect if this is an external service that might be unreliable"""
+        if self.transport != "http":
+            return False
+            
+        url = self.spec.get("url", "").lower()
+        
+        # Common external service indicators
+        external_domains = [
+            "zapier.com", "api.zapier.com", "mcp.zapier.com",
+            "api.github.com", "github.com",
+            "api.openai.com", "openai.com",
+            "googleapis.com", "google.com",
+            "api.slack.com", "slack.com",
+            "api.notion.com", "notion.so",
+            "api.trello.com", "trello.com",
+            "api.airtable.com", "airtable.com"
+        ]
+        
+        # Check if URL contains any external domain
+        return any(domain in url for domain in external_domains)
+    
+    def _detect_third_party_api(self) -> bool:
+        """Detect if this is a third-party API (not localhost/internal)"""
+        if self.transport != "http":
+            return False
+            
+        url = self.spec.get("url", "").lower()
+        
+        # Internal/localhost indicators
+        internal_indicators = ["localhost", "127.0.0.1", "0.0.0.0", "::1"]
+        
+        return not any(indicator in url for indicator in internal_indicators)
+    
+    def _assess_complexity(self) -> str:
+        """Assess service complexity: 'simple', 'medium', 'complex'"""
+        # Check for complexity indicators
+        complexity_indicators = 0
+        
+        # External services are inherently more complex
+        if self.is_external:
+            complexity_indicators += 2
+        
+        # Third-party APIs add complexity
+        if self.is_third_party_api:
+            complexity_indicators += 1
+            
+        # HTTP services are generally more complex than stdio
+        if self.transport == "http":
+            complexity_indicators += 1
+            
+        # Check for environment complexity (many env vars = more complex setup)
+        env_vars = self.spec.get("env", {})
+        if len(env_vars) > 3:
+            complexity_indicators += 1
+            
+        # Classify based on indicators
+        if complexity_indicators >= 4:
+            return "complex"
+        elif complexity_indicators >= 2:
+            return "medium"
+        else:
+            return "simple"
+    
+    def _calculate_init_timeout(self) -> int:
+        """Calculate appropriate initialization timeout"""
+        base_timeout = 30  # Default for stdio services
+        
+        if self.transport == "http":
+            base_timeout = 45  # HTTP services need more time
+            
+        if self.is_external:
+            base_timeout += 15  # External services need extra time
+            
+        if self.complexity_level == "complex":
+            base_timeout += 10
+        elif self.complexity_level == "medium":
+            base_timeout += 5
+            
+        return base_timeout
+    
+    def _calculate_retry_count(self) -> int:
+        """Calculate appropriate retry count for startup"""
+        base_retries = 3  # Default
+        
+        if self.is_external:
+            base_retries += 2  # External services can be flaky
+            
+        if self.transport == "http":
+            base_retries += 1  # HTTP services might need more retries
+            
+        return base_retries
+    
+    def _calculate_health_failure_limit(self) -> int:
+        """Calculate how many health failures to tolerate"""
+        base_limit = 5  # Default
+        
+        if self.is_external:
+            base_limit += 5  # External services can have temporary outages
+            
+        if self.complexity_level == "complex":
+            base_limit += 2
+            
+        return base_limit
+    
+    def _calculate_max_retries(self) -> int:
+        """Calculate maximum retries before marking as errored"""
+        base_retries = MAX_RETRY  # Default 5
+        
+        if self.is_external:
+            base_retries += 3  # External services need more chances
+            
+        if self.transport == "http":
+            base_retries += 1  # HTTP services might need more retries
+            
+        return base_retries
+
 # -------------------------------------------------------------------- constants
 CONF_PATH    = Path(__file__).parent / "mcp_servers.json"
 DEFAULT_PORT = 5859
@@ -35,7 +171,7 @@ DEFAULT_PORT = 5859
 State     = Literal["starting", "running", "retrying", "stopped", "errored"]
 Transport = Literal["stdio", "http"]
 
-TIMEOUT_INITIAL = 120      # s – Increased timeout for slow operations like Zapier
+TIMEOUT_INITIAL = 120      # s – Increased timeout for slow operations like external services
 HEALTH_INT    = 45         # s – between health probes (increased to avoid heartbeat clashes)
 SESSION_TTL   = 3600       # s – refresh session after this period
 MAX_RETRY     = 5
@@ -183,6 +319,10 @@ class Child:
             self.transport = "http"
         else:
             self.transport = "stdio"
+            
+        # Create service profile for adaptive behavior
+        self.profile = ServiceProfile(name, spec, self.transport)
+        
         self.proc        = None
         self.pid         = None
         self.session     : Optional[ClientSession] = None
@@ -213,6 +353,9 @@ class Child:
         # --- Tools caching ---
         self._cached_tools = None
         self._tools_cache_time = 0
+
+        # --- Service profile for adaptive settings ---
+        self.service_profile = ServiceProfile(name, spec, self.transport)
 
     async def start(self):
         await self._cmd_q.put(("start",))
@@ -266,15 +409,9 @@ class Child:
             await self._spawn_if_needed()
             
             # Try to establish session with retries
-            # Use higher retry count for external HTTP services which can be flaky
+            # Use adaptive retry count based on service profile
             base_retry_count = int(self.spec.get("env", {}).get("RETRY_COUNT", "3"))
-            if self.transport == "http" and "zapier.com" in self.spec.get("url", ""):
-                retry_count = max(base_retry_count, 5)  # At least 5 retries for Zapier
-            elif self.transport == "http":
-                retry_count = max(base_retry_count, 4)  # At least 4 retries for other HTTP services
-            else:
-                retry_count = base_retry_count  # Use default for stdio services
-                
+            retry_count = max(base_retry_count, self.profile.retry_count)
             retry_delay = int(self.spec.get("env", {}).get("RETRY_DELAY", "2000")) / 1000
             
             for attempt in range(retry_count):
@@ -287,21 +424,21 @@ class Child:
                         break
                 except Exception as e:
                     error_msg = str(e)
-                    if "500 internal server error" in error_msg.lower() and self.transport == "http":
+                    if "500 internal server error" in error_msg.lower() and self.profile.is_external:
                         log(f"Attempt {attempt + 1} failed for {self.name} (external service error): {e}")
-                        if "zapier.com" in self.spec.get("url", ""):
-                            log(f"{self.name}: This appears to be a temporary Zapier API issue, will retry...")
+                        if self.profile.is_third_party_api:
+                            log(f"{self.name}: This appears to be a temporary external API issue, will retry...")
                     else:
                         log(f"Attempt {attempt + 1} failed for {self.name}: {e}")
                     await self._close_session()
                     if attempt < retry_count - 1:
                         # Use longer delay for external service errors
-                        delay = retry_delay * 2 if "500 internal server error" in error_msg.lower() else retry_delay
+                        delay = retry_delay * 2 if ("500 internal server error" in error_msg.lower() and self.profile.is_external) else retry_delay
                         await asyncio.sleep(delay)
             else:
                 # All attempts failed
-                if self.transport == "http" and "zapier.com" in self.spec.get("url", ""):
-                    raise Exception(f"Failed to connect to Zapier API after {retry_count} attempts. This is likely a temporary issue with Zapier's external service.")
+                if self.profile.is_external:
+                    raise Exception(f"Failed to connect to external service '{self.name}' after {retry_count} attempts. This is likely a temporary issue with the external API.")
                 else:
                     raise Exception(f"Failed to get tools after {retry_count} attempts")
             
@@ -513,13 +650,8 @@ class Child:
             
             # Mandatory MCP handshake with timeout
             try:
-                # Use longer timeout for external HTTP services like Zapier
-                if self.transport == "http" and "zapier.com" in self.spec.get("url", ""):
-                    init_timeout = 60  # 60 seconds for Zapier (external service)
-                elif self.transport == "http":
-                    init_timeout = 45  # 45 seconds for other HTTP services
-                else:
-                    init_timeout = 30  # 30 seconds for stdio services
+                # Use adaptive timeout based on service profile
+                init_timeout = self.profile.init_timeout
                     
                 log(f"{self.name}: Starting MCP session initialization (timeout: {init_timeout}s)")
                 await asyncio.wait_for(self.session.initialize(), timeout=init_timeout)
@@ -530,9 +662,9 @@ class Child:
                 self.last_error = error_msg
                 raise Exception(error_msg)
             except Exception as e:
-                # Check for specific HTTP errors from external services
+                # Enhanced error handling based on service profile
                 error_str = str(e).lower()
-                if "500 internal server error" in error_str and self.transport == "http":
+                if "500 internal server error" in error_str and self.profile.is_external:
                     error_msg = f"External service error (HTTP 500): {e}. This is likely a temporary issue with the external API."
                     log(f"{self.name}: {error_msg}")
                     self.last_error = error_msg
@@ -705,7 +837,7 @@ class Child:
                         
                         # If we've had too many total failures, mark as errored
                         # Be more tolerant for external HTTP services which can have temporary outages
-                        failure_limit = 10 if (self.transport == "http" and "zapier.com" in self.spec.get("url", "")) else 5
+                        failure_limit = self.profile.health_failure_limit
                         if self.health_failures >= failure_limit:
                             log(f"{self.name} exceeded health failure limit ({self.health_failures}/{failure_limit}), marking as errored")
                             
@@ -784,12 +916,8 @@ class Child:
                         except Exception:
                             pass
                             
-        # Use higher retry limit for external HTTP services which can be flaky
-        max_retries = MAX_RETRY
-        if self.transport == "http" and "zapier.com" in self.spec.get("url", ""):
-            max_retries = 8  # More retries for Zapier due to external service flakiness
-        elif self.transport == "http":
-            max_retries = 6  # More retries for other HTTP services
+        # Use adaptive retry limit based on service characteristics
+        max_retries = self.profile.max_retries
             
         if self.retries >= max_retries:
             self.state = "errored"
