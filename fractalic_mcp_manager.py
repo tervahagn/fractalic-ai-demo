@@ -443,8 +443,10 @@ class Child:
                 and time.time() - self.session_at < SESSION_TTL
                 and self.healthy):  # Only reuse if healthy
             try:
-                # Quick health check on existing session
-                await asyncio.wait_for(self.session.list_tools(), timeout=5)
+                # Quick health check on existing session - use ping if available, otherwise skip
+                if hasattr(self.session, 'ping'):
+                    await asyncio.wait_for(self.session.ping(), timeout=5)
+                # If ping not available, trust the session is valid (health check will catch issues)
                 return  # Session is good, reuse it
             except Exception as e:
                 log(f"{self.name}: Session health check failed: {e}, creating new session")
@@ -514,14 +516,44 @@ class Child:
     async def _close_session(self):
         """Close the session and cleanup all resources properly."""
         try:
-            if self.session:
-                # Try to close the session gracefully
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(self.session.close(), timeout=5.0)
+            # Cancel any ongoing tasks first
+            if hasattr(self, '_health') and self._health and not self._health.done():
+                self._health.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._health
                     
+            # Cancel output capture tasks
+            if self._stdout_task and not self._stdout_task.done():
+                self._stdout_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._stdout_task
+                    
+            if self._stderr_task and not self._stderr_task.done():
+                self._stderr_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._stderr_task
+                    
+            # Close session - check if it has a close method first
+            if self.session:
+                try:
+                    if hasattr(self.session, 'close'):
+                        await asyncio.wait_for(self.session.close(), timeout=3.0)
+                    else:
+                        # MCP ClientSession doesn't have close method, just clear reference
+                        log(f"{self.name}: Session cleanup (no close method available)")
+                except asyncio.TimeoutError:
+                    log(f"{self.name}: Session close timed out")
+                except Exception as e:
+                    log(f"{self.name}: Error closing session: {e}")
+                    
+            # Close exit stack with proper timeout and error handling
             if self._exit_stack:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(self._exit_stack.aclose(), timeout=5.0)
+                try:
+                    await asyncio.wait_for(self._exit_stack.aclose(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    log(f"{self.name}: Exit stack close timed out")
+                except Exception as e:
+                    log(f"{self.name}: Error closing exit stack: {e}")
                     
         except Exception as e:
             log(f"{self.name}: Error during session cleanup: {e}")
@@ -529,6 +561,12 @@ class Child:
             # Always reset these regardless of errors
             self.session = None
             self._exit_stack = None
+            self._stdout_task = None
+            self._stderr_task = None
+            self._health = None
+            # Clear cached tools on session close
+            self._cached_tools = None
+            self._tools_cache_time = 0
             self.session_at = 0.0
             self.healthy = False
 
@@ -542,9 +580,22 @@ class Child:
                     break
                     
                 await self._ensure_session()
-                await asyncio.wait_for(self.session.list_tools(), timeout=TIMEOUT_INITIAL / 3)
-                self.healthy = True        # Mark as healthy after successful tool list
-                self.health_failures = 0   # Reset on success
+                
+                # Always use cached tools() method to maintain consistent caching behavior
+                try:
+                    # Use our cached tools() method instead of direct session.list_tools()
+                    await asyncio.wait_for(self.tools(), timeout=TIMEOUT_INITIAL / 3)
+                    self.healthy = True        # Mark as healthy after successful health check
+                    self.health_failures = 0   # Reset on success
+                except Exception as e:
+                    # If cached tools() fails, try a simple ping as lightweight fallback
+                    try:
+                        await asyncio.wait_for(self.session.ping(), timeout=5)
+                        self.healthy = True
+                        self.health_failures = 0
+                    except:
+                        # Both failed, mark as unhealthy
+                        raise e
                 
             except asyncio.CancelledError:
                 log(f"{self.name}: Health check cancelled")
@@ -652,6 +703,40 @@ class Child:
             self.healthy = False
             raise
 
+    async def tools(self):
+        """Get tools with caching to reduce repeated list_tools() calls."""
+        try:
+            # Check if cached tools are available and recent (within 30 seconds)
+            if (hasattr(self, '_cached_tools') and self._cached_tools and 
+                time.time() - getattr(self, '_tools_cache_time', 0) < 30):
+                return self._cached_tools
+            
+            # Cache expired or doesn't exist, refresh it
+            await self._ensure_session()
+            tl = await asyncio.wait_for(self.session.list_tools(), TIMEOUT_INITIAL)
+            tools_list = [tool_to_obj(t) for t in tl.tools]
+            
+            # Apply Vertex AI schema sanitization only if enabled
+            if ENABLE_SCHEMA_SANITIZATION:
+                sanitized_tools = [sanitize_tool_schema(tool) for tool in tools_list]
+            else:
+                sanitized_tools = tools_list  # No sanitization
+                
+            # Cache the results
+            self._cached_tools = sanitized_tools
+            self._tools_cache_time = time.time()
+            
+            return sanitized_tools
+            
+        except Exception as e:
+            error_msg = f"Failed to get tools: {str(e) if str(e) else 'Unknown error'}"
+            self.last_error = error_msg
+            log(f"{self.name}: {error_msg}")
+            # Invalidate session on error
+            self.session_at = 0.0
+            self.healthy = False
+            raise
+
     async def call_tool(self, tool: str, args: dict):
         try:
             await self._ensure_session()
@@ -699,8 +784,10 @@ class Child:
         if self.state != "running":
             return {"tool_count": 0, "token_count": 0, "tools_error": f"MCP state is {self.state}"}
         try:
-            tl = await self.list_tools()
-            tools_list = [tool_to_obj(t) for t in tl.tools]
+            # Use cached tools() method instead of direct list_tools()
+            cached_tools = await self.tools()
+            # Convert to the format expected by get_tools_info
+            tools_list = cached_tools if isinstance(cached_tools, list) else []
             if tools_list == self._last_tools_list:
                 return {
                     "tool_count": len(self._last_tools_list),
@@ -783,13 +870,14 @@ class Supervisor:
                 out[n] = {"error": error_detail, "tools": []}
                 continue
             try:
-                tl = await c.list_tools()
-                tools_list = [tool_to_obj(t) for t in tl.tools]
-                # Apply Vertex AI schema sanitization only if enabled
-                if ENABLE_SCHEMA_SANITIZATION:
-                    sanitized_tools = [sanitize_tool_schema(tool) for tool in tools_list]
-                else:
-                    sanitized_tools = tools_list  # No sanitization
+                # Use cached tools info if available to reduce repeated list_tools calls
+                tools_info = await c.get_tools_info()
+                if "tools_error" in tools_info:
+                    out[n] = {"error": tools_info["tools_error"], "tools": []}
+                    continue
+                    
+                # Always use cached tools() method to maintain consistent caching behavior
+                sanitized_tools = await c.tools()
                 out[n] = {"tools": sanitized_tools}
             except Exception as e:
                 error_msg = str(e) if str(e) else f"Unknown error from {n}"
@@ -804,8 +892,9 @@ class Supervisor:
             if c.state == "errored":
                 continue  # Skip errored children
             try:
-                tl = await c.list_tools()
-                if any(t.name == name for t in tl.tools):
+                # Use cached tools() method instead of direct list_tools calls
+                cached_tools = await c.tools()
+                if any(tool.get('name') == name for tool in cached_tools):
                     return await c.call_tool(name, args)
             except Exception:
                 pass
@@ -903,21 +992,22 @@ async def run_serve(port: int):
     await stop_ev.wait()
     log("shutting down …")
     
-    # Improved shutdown sequence
+    # Improved shutdown sequence with better signal handling
     try:
-        # Stop local servers only with shorter timeout (faster kill)
-        await asyncio.wait_for(sup.stop_local_only(), timeout=10.0)
+        # Force immediate shutdown without waiting for graceful cleanup
+        await asyncio.wait_for(sup.stop_local_only(), timeout=3.0)
         
         # Clean up the web runner
-        await runner.cleanup()
+        await asyncio.wait_for(runner.cleanup(), timeout=2.0)
         
-        # Give time for async cleanup with shorter intervals
-        for i in range(3):
-            await asyncio.sleep(0.1)
-            gc.collect()
-            
+        # Minimal cleanup time
+        await asyncio.sleep(0.1)
+        gc.collect()
+        
     except asyncio.TimeoutError:
         log("Warning: Shutdown timed out, forcing exit")
+        # Force exit immediately
+        sys.exit(0)
     except Exception as e:
         log(f"Warning: Error during shutdown: {e}")
     
