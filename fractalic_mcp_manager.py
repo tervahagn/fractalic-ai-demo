@@ -982,7 +982,6 @@ class Child:
             if time_since_last_request < self.profile.tool_request_cooldown:
                 # Return cached tools if we're in cooldown period
                 if hasattr(self, '_cached_tools') and self._cached_tools:
-                    log(f"{self.name}: Rate limited tool request, returning cached tools")
                     return self._cached_tools
                 else:
                     # If no cache but in cooldown, wait for cooldown to expire
@@ -1034,7 +1033,6 @@ class Child:
             log(f"{self.name}: Calling tool '{tool}' with timeout {TIMEOUT_INITIAL}s")
             result = await asyncio.wait_for(
                 self.session.call_tool(tool, args), TIMEOUT_INITIAL)
-            log(f"{self.name}: Tool '{tool}' completed successfully")
             return result
         except asyncio.TimeoutError as e:
             error_msg = f"Tool '{tool}' timed out after {TIMEOUT_INITIAL}s"
