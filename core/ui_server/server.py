@@ -555,3 +555,79 @@ async def tools_schema(tools_dir: str = Query("tools", description="Path to the 
         return JSONResponse(content=schema)
     except Exception as e:
         return JSONResponse(status_code=500, content={"detail": f"Internal Server Error: {str(e)}"})
+
+@app.delete("/delete_item/")
+async def delete_item(path: str = Query(...)):
+    """
+    Delete a file or directory from the filesystem.
+    """
+    try:
+        # Resolve the path
+        item_path = Path(path).resolve()
+        
+        # Ensure the path exists
+        if not item_path.exists():
+            raise HTTPException(status_code=404, detail="File or directory not found")
+        
+        # Check if it's a file or directory and delete accordingly
+        if item_path.is_file():
+            item_path.unlink()
+            return JSONResponse(status_code=200, content={"detail": f"File '{item_path.name}' deleted successfully"})
+        elif item_path.is_dir():
+            import shutil
+            shutil.rmtree(item_path)
+            return JSONResponse(status_code=200, content={"detail": f"Directory '{item_path.name}' deleted successfully"})
+        else:
+            raise HTTPException(status_code=400, detail="Invalid file or directory")
+            
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied: Cannot delete file or directory")
+    except Exception as e:
+        print(f"Error deleting item: {str(e)}")
+        return JSONResponse(status_code=500, content={"detail": f"Internal Server Error: {str(e)}"})
+
+@app.post("/rename_item/")
+async def rename_item(old_path: str = Query(...), new_name: str = Query(...)):
+    """
+    Rename a file or directory.
+    """
+    try:
+        # Resolve the old path
+        old_item_path = Path(old_path).resolve()
+        
+        # Ensure the old path exists
+        if not old_item_path.exists():
+            raise HTTPException(status_code=404, detail="File or directory not found")
+        
+        # Validate new name (basic validation)
+        if not new_name or new_name.strip() == "":
+            raise HTTPException(status_code=400, detail="New name cannot be empty")
+        
+        # Check for invalid characters in the new name
+        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+        if any(char in new_name for char in invalid_chars):
+            raise HTTPException(status_code=400, detail="New name contains invalid characters")
+        
+        # Create the new path (same parent directory, new name)
+        new_item_path = old_item_path.parent / new_name
+        
+        # Check if target already exists
+        if new_item_path.exists():
+            raise HTTPException(status_code=409, detail="A file or directory with that name already exists")
+        
+        # Rename the item
+        old_item_path.rename(new_item_path)
+        
+        item_type = "directory" if new_item_path.is_dir() else "file"
+        return JSONResponse(status_code=200, content={
+            "detail": f"{item_type.capitalize()} renamed successfully",
+            "old_name": old_item_path.name,
+            "new_name": new_name,
+            "new_path": str(new_item_path)
+        })
+        
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied: Cannot rename file or directory")
+    except Exception as e:
+        print(f"Error renaming item: {str(e)}")
+        return JSONResponse(status_code=500, content={"detail": f"Internal Server Error: {str(e)}"})
