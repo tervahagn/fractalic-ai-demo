@@ -78,6 +78,35 @@ class AST:
     def get_part_by_path(self, block_id_path: str, use_hierarchy: bool) -> Dict[str, Node]:
         return get_ast_part_by_path(self, block_id_path, use_hierarchy)
     
+    def get_system_prompts(self) -> str:
+        """Get system prompts from current file, or return default if none exist"""
+        system_nodes = []
+        current = self.first()
+        
+        while current:
+            if hasattr(current, 'is_system') and current.is_system:
+                system_nodes.append(current)
+            current = current.next
+        
+        if system_nodes:
+            # Concatenate system blocks in document order
+            return "\n\n".join(node.content for node in system_nodes)
+        else:
+            # Return default system prompt when no .system blocks exist
+            return self._get_default_system_prompt()
+    
+    def get_non_system_nodes(self) -> Dict[str, Node]:
+        """Get all nodes that are not system prompts for context building"""
+        non_system_nodes = {}
+        for key, node in self.parser.nodes.items():
+            if not (hasattr(node, 'is_system') and node.is_system):
+                non_system_nodes[key] = node
+        return non_system_nodes
+    
+    def _get_default_system_prompt(self) -> str:
+        """Default system prompt used when no .system blocks are defined"""
+        return """You are a helpful AI assistant. Provide clear, accurate, and helpful responses."""
+
 def nodes_to_ast(nodes: Dict[str, Node]) -> AST:
     new_ast = AST("")
     new_ast.parser.nodes = nodes
@@ -314,7 +343,7 @@ def _get_ast_part(ast: AST, starting_node: Node, use_hierarchy: bool) -> AST:
             
             current_node = current_node.next
     
-    #print(f"Collected nodes: {[node.id for node in result_nodes.values()]}")
+    #print(f"Collected nodes: {[node.id for node in result_nodes.values()]}
     
     new_ast.parser.nodes = result_nodes
     new_ast.parser.head = get_head(result_nodes)

@@ -342,6 +342,7 @@ class HeadingBlock:
     id: Optional[str]
     content: str
     role: str = "user"  # Added field with default role "user"
+    is_system: bool = False  # Track if this is a system prompt block
 @dataclass
 class OperationBlock:
     operation: str
@@ -544,6 +545,9 @@ def parse_document(text: str, schema_text: str) -> List[Any]:
     parsing_state = 'normal'
     current_block = None
     previous_line = None
+    
+    # Track system block hierarchy - if parent is system, children are too
+    system_block_levels = []  # Stack to track system block levels
 
     for idx, l in enumerate(lines):
         line = l.rstrip('\n')
@@ -560,11 +564,29 @@ def parse_document(text: str, schema_text: str) -> List[Any]:
             else:
                 title = heading_line
                 id_value = None
+            
+            # Check if this is a system block
+            # Extract heading text without # symbols and trim
+            heading_text = re.sub(r'^#+\s*', '', heading_line).strip()
+            # Remove {id=...} pattern if present for system detection
+            heading_text_clean = re.sub(r'\s*\{id=[^}]+\}$', '', heading_text)
+            is_system_block = heading_text_clean.startswith('.system')
+            
+            # Update system block hierarchy tracking
+            # Remove levels deeper than current level
+            system_block_levels = [l for l in system_block_levels if l < level]
+            
+            # If current block is system or parent was system, mark as system
+            if is_system_block or system_block_levels:
+                is_system_block = True
+                system_block_levels.append(level)
+            
             current_block = HeadingBlock(
                 level=level,
                 title=title,
                 id=id_value,
-                content=heading_line+'\n'
+                content=heading_line+'\n',
+                is_system=is_system_block
             )
             blocks.append(current_block)
             parsing_state = 'heading_block'
@@ -575,6 +597,11 @@ def parse_document(text: str, schema_text: str) -> List[Any]:
         if re.match(r'^@[a-zA-Z]+', line) and (previous_line is None or previous_line.strip() == ''):
             parsing_state = 'operation_block'
             operation = line.strip('@').strip()
+            
+            # Clear system block hierarchy when operation is encountered
+            # Operations break the hierarchical inheritance of system blocks
+            system_block_levels = []
+            
             current_block = OperationBlock(
               operation=operation,
               params={},
@@ -641,7 +668,8 @@ class Parser:
                     id=node_id,
                     indent=block.level * 4,
                     content= block.content.strip(),
-                    role=block.role  # Default role for heading blocks
+                    role=block.role,  # Default role for heading blocks
+                    is_system=block.is_system  # Pass system block flag
                 )
             elif isinstance(block, OperationBlock):
                 node = Node(

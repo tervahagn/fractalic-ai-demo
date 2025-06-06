@@ -25,11 +25,14 @@ def process_llm(ast: AST, current_node: Node) -> Optional[Node]:
     """Process @llm operation with updated schema support"""
     console = Console(force_terminal=True)
 
+    # Extract system prompts first (always available)
+    system_prompt = ast.get_system_prompts()
+
     def get_previous_headings(node: Node) -> str:
         context = []
         current = ast.first()
         while current and current != node:
-            if current.type == NodeType.HEADING:
+            if current.type == NodeType.HEADING and not (hasattr(current, 'is_system') and current.is_system):
                 context.append(current.content)
             current = current.next
         return "\n\n".join(context)
@@ -45,6 +48,11 @@ def process_llm(ast: AST, current_node: Node) -> Optional[Node]:
         # print(f"enableOperationsVisibility: {enable_operations_visibility}")
 
         while current and current != node:
+            # Skip system blocks from context building  
+            if hasattr(current, 'is_system') and current.is_system:
+                current = current.next
+                continue
+                
             # If enableOperationsVisibility is True, include all nodes
             # Otherwise, only include HEADING nodes (original behavior)
             if enable_operations_visibility or current.type == NodeType.HEADING:
@@ -161,10 +169,12 @@ def process_llm(ast: AST, current_node: Node) -> Optional[Node]:
     # Add prompt if specified (always last)
     if prompt:
         prompt_parts.append(prompt)
-        messages.append({"role": "user", "content": prompt})
-
-    # Combine all parts with proper spacing
+        messages.append({"role": "user", "content": prompt})    # Combine all parts with proper spacing
     prompt_text = "\n\n".join(part.strip() for part in prompt_parts if part.strip())
+
+    # Prepend system prompt to messages if messages exist
+    if messages:
+        messages.insert(0, {"role": "system", "content": system_prompt})
 
     # Call LLM - use messages if available, otherwise fall back to prompt_text
     llm_provider = provider
@@ -175,6 +185,9 @@ def process_llm(ast: AST, current_node: Node) -> Optional[Node]:
     Config.API_KEY = provider_cfg.get('apiKey')
     llm_client = LLMClient(model=llm_model)
     actual_model = model if model else getattr(llm_client.client, 'settings', {}).get('model', llm_model)
+
+    # Add system prompt to params for LLM clients that use it
+    params['system_prompt'] = system_prompt
 
     # Always enable streaming
     params['stream'] = True
