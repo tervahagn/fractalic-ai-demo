@@ -626,12 +626,27 @@ class Child:
             raise
 
     async def _ensure_session(self, force=False):
-        # Check if current session is still valid
+        """
+        Ensures a valid MCP session is available for communication.
+        
+        This method handles session lifecycle management including:
+        - Session reuse when possible to avoid connection overhead
+        - Health checks to verify session validity
+        - Graceful session recreation when needed
+        - Proper cleanup and resource management
+        
+        Args:
+            force (bool): If True, forces creation of a new session even if current one seems valid
+        """
+        
+        # STEP 1: Check if we can reuse the existing session
+        # We can reuse if: not forced, session exists, session is fresh, and service is healthy
         if (not force and self.session
                 and time.time() - self.session_at < SESSION_TTL
                 and self.healthy):  # Only reuse if healthy
             try:
-                # Quick health check on existing session - use ping if available, otherwise skip
+                # Perform a quick health check on the existing session
+                # Some MCP servers support ping for lightweight connectivity testing
                 if hasattr(self.session, 'ping'):
                     await asyncio.wait_for(self.session.ping(), timeout=5)
                 # If ping not available, trust the session is valid (health check will catch issues)
@@ -642,22 +657,29 @@ class Child:
                 # Mark this as a temporary reset to preserve cache
                 self._temporary_session_reset = True
                 
+        # STEP 2: Clean up any existing session and prepare for new one
+        # Close current session properly and initialize new context manager
         await self._close_session()
         self._exit_stack = contextlib.AsyncExitStack()
         
         try:
+            # STEP 3: Create appropriate transport based on service configuration
+            # Handle HTTP-based and stdio-based MCP servers differently
             if self.transport == "http":
-                # Check if this is an SSE endpoint (generic detection based on URL path)
+                # HTTP transport: distinguish between SSE and regular HTTP endpoints
                 if "/sse" in self.spec["url"]:
-                    # Use SSE client for SSE endpoints (returns only read_stream, write_stream)
+                    # Server-Sent Events (SSE) client for real-time streaming
+                    # Returns only read_stream and write_stream (no additional info)
                     read_stream, write_stream = await self._exit_stack.enter_async_context(
                         sse_client(self.spec["url"])
                     )
                 else:
-                    # Use streamable HTTP client for other HTTP services (returns read_stream, write_stream, _)
+                    # Regular HTTP client for request/response communication
+                    # Returns read_stream, write_stream, and additional connection info
                     read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
                         streamablehttp_client(self.spec["url"])
                     )
+                # Create MCP session using the HTTP streams
                 self.session = await self._exit_stack.enter_async_context(
                     ClientSession(
                         read_stream,
@@ -666,6 +688,8 @@ class Child:
                     )
                 )
             else:
+                # STDIO transport: communicate with local process via stdin/stdout
+                # This is for MCP servers that run as separate processes
                 stdio_ctx = stdio_client(StdioServerParameters(
                     command=self.spec["command"],
                     args=self.spec.get("args", []),
@@ -676,34 +700,40 @@ class Child:
                     ClientSession(*transport)
                 )
             
-            # Mandatory MCP handshake with timeout
+            # STEP 4: Perform MCP handshake with adaptive timeout handling
+            # The handshake establishes the MCP protocol and confirms server capabilities
             try:
-                # Use adaptive timeout based on service profile
+                # Use timeout based on service profile (external services get longer timeouts)
                 init_timeout = self.profile.init_timeout
                     
                 log(f"{self.name}: Starting MCP session initialization (timeout: {init_timeout}s)")
                 await asyncio.wait_for(self.session.initialize(), timeout=init_timeout)
                 log(f"{self.name}: MCP session initialization completed successfully")
             except asyncio.TimeoutError:
+                # Handshake took too long - likely server is unresponsive
                 error_msg = f"MCP session initialization timed out after {init_timeout}s"
                 log(f"{self.name}: {error_msg}")
                 self.last_error = error_msg
                 raise Exception(error_msg)
             except Exception as e:
-                # Enhanced error handling based on service profile
+                # Handle different types of handshake failures with context-aware messaging
                 error_str = str(e).lower()
                 if "500 internal server error" in error_str and self.profile.is_external:
+                    # External API is having issues - this is often temporary
                     error_msg = f"External service error (HTTP 500): {e}. This is likely a temporary issue with the external API."
                     log(f"{self.name}: {error_msg}")
                     self.last_error = error_msg
                     # For external service errors, mark as retriable
                     raise Exception(error_msg)
                 else:
+                    # Generic handshake failure - could be protocol mismatch, auth issues, etc.
                     error_msg = f"MCP session initialization failed: {e}"
                     log(f"{self.name}: {error_msg}")
                     self.last_error = error_msg
                     raise
             
+            # STEP 5: Mark session as successfully established
+            # Update timestamps and health status after successful handshake
             self.session_at = time.time()
             self.started_at = self.started_at or self.session_at
             self.healthy = True               # Mark as healthy after successful handshake
@@ -712,7 +742,8 @@ class Child:
                 delattr(self, '_temporary_session_reset')
             
         except Exception as e:
-            # Clean up on failure
+            # STEP 6: Clean up on any failure during session creation
+            # Ensure we don't leave partial sessions or resources hanging
             await self._close_session()
             raise
 
