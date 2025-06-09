@@ -1,3 +1,4 @@
+# filepath: /Users/marina/llexem-jan-25-deploy/llexem_deploy_2025/fractalic/fractalic.py
 import warnings
 # TODO: #5 remove warning supression when pydantic v2 is stable
 warnings.filterwarnings(
@@ -38,55 +39,228 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 original_open = open
 
 
-def setup_provider_config(args, settings):
-    raw_model = args.model or settings.get("defaultProvider")
-    if not raw_model:
-        raise ValueError("No model specified via --model or defaultProvider in settings.toml")
+def run_fractalic(input_file, task_file=None, param_input_user_request=None, capture_output=False, 
+                 model=None, api_key=None, operation=None, show_operations=False):
+    """
+    Run a Fractalic script programmatically - the core execution function.
+    
+    Args:
+        input_file: Path to the Fractalic script to execute
+        task_file: Optional path to task file for parameter injection
+        param_input_user_request: Optional parameter path for injection
+        capture_output: Whether to capture output (not used in current implementation)
+        model: LLM model to use (overrides settings.defaultProvider)
+        api_key: LLM API key (overrides settings)
+        operation: Default operation to perform
+        show_operations: Make operations visible to LLM
+    
+    Returns:
+        dict: Execution result with success status, output, and return information
+    """
+    original_cwd = os.getcwd()
+    
+    try:
+        # Load settings
+        settings = load_settings()
+        
+        # Update show-operations setting if explicitly requested
+        if show_operations:
+            if 'settings' not in settings:
+                settings['settings'] = {}
+            settings['settings']['enableOperationsVisibility'] = True
+        
+        # Setup provider configuration
+        raw_model = model or settings.get("defaultProvider")
+        if not raw_model:
+            return {
+                'success': False,
+                'error': 'No model specified and no defaultProvider in settings.toml',
+                'output': '',
+                'explicit_return': False,
+                'return_content': None,
+                'branch_name': None
+            }
 
-    all_models = settings.get("settings", {})
-    model_key = None
+        all_models = settings.get("settings", {})
+        model_key = None
 
-    # 1) direct match on the table key
-    if raw_model in all_models:
-        model_key = raw_model
-    else:
-        # 2) match against each record's "model" field (and common variants)
-        for key, conf in all_models.items():
-            name = conf.get("model", key)
-            if raw_model == name \
-               or raw_model == name.replace(".", "-") \
-               or raw_model == name.replace(".", "_"):
-                model_key = key
-                break
-        # 3) fallback: sanitize CLI string to table keys
-        if model_key is None:
-            for alt in (raw_model.replace(".", "-"), raw_model.replace(".", "_")):
-                if alt in all_models:
-                    model_key = alt
+        # 1) direct match on the table key
+        if raw_model in all_models:
+            model_key = raw_model
+        else:
+            # 2) match against each record's "model" field (and common variants)
+            for key, conf in all_models.items():
+                name = conf.get("model", key)
+                if raw_model == name \
+                   or raw_model == name.replace(".", "-") \
+                   or raw_model == name.replace(".", "_"):
+                    model_key = key
                     break
+            # 3) fallback: sanitize CLI string to table keys
+            if model_key is None:
+                for alt in (raw_model.replace(".", "-"), raw_model.replace(".", "_")):
+                    if alt in all_models:
+                        model_key = alt
+                        break
 
-    if model_key is None:
-        raise KeyError(
-            f'model "{raw_model}" not found under [settings]. '
-            f"Available models: {', '.join(all_models.keys())}"
+        if model_key is None:
+            return {
+                'success': False,
+                'error': f'model "{raw_model}" not found under [settings]. Available models: {", ".join(all_models.keys())}',
+                'output': '',
+                'explicit_return': False,
+                'return_content': None,
+                'branch_name': None
+            }
+
+        # use the section name (anthropic/openrouter/openai) as provider
+        provider = model_key
+        provider_settings = all_models[model_key]
+        # ensure downstream sees the actual model name (with dots if present)
+        provider_settings = {
+            **provider_settings,
+            "model": provider_settings.get("model", model_key),
+        }
+
+        # Get API key (prefer parameter, then provider settings)
+        final_api_key = api_key or provider_settings.get("apiKey")
+        if not final_api_key:
+            return {
+                'success': False,
+                'error': f'No API key found for provider {provider}',
+                'output': '',
+                'explicit_return': False,
+                'return_content': None,
+                'branch_name': None
+            }
+        
+        # Configure globals
+        Config.TOML_SETTINGS = settings
+        Config.LLM_PROVIDER = provider
+        Config.API_KEY = final_api_key
+        Config.DEFAULT_OPERATION = operation or settings.get('defaultOperation', 'append')
+        
+        # Set environment variable for API key
+        os.environ[f"{provider.upper()}_API_KEY"] = final_api_key
+        
+        # Change working directory to the input file's directory for proper git tracking
+        input_file_dir = os.path.dirname(os.path.abspath(input_file))
+        
+        # Change to the input file's directory so git operations happen in the right place
+        os.chdir(input_file_dir)
+        print(f"Changed working directory to: {input_file_dir}")
+        
+        # Validate input file exists
+        input_file_basename = os.path.basename(input_file)
+        if not os.path.exists(input_file_basename):
+            return {
+                'success': False,
+                'error': f"Input file not found: {input_file}",
+                'output': '',
+                'explicit_return': False,
+                'return_content': None,
+                'branch_name': None
+            }
+        
+        # Handle parameter injection if provided
+        param_node = None
+        if task_file and param_input_user_request:
+            if not os.path.exists(task_file):
+                return {
+                    'success': False,
+                    'error': f"Task file not found: {task_file}",
+                    'output': '',
+                    'explicit_return': False,
+                    'return_content': None,
+                    'branch_name': None
+                }
+            temp_ast = parse_file(task_file)
+            param_node = temp_ast.get_part_by_path(param_input_user_request, True)
+        
+        # Run the Fractalic script (use basename since we're in the correct directory)
+        result_nodes, call_tree_root, ctx_file, ctx_hash, trc_file, trc_hash, branch_name, explicit_return = run(
+            input_file_basename,
+            param_node,
+            p_call_tree_node=None
         )
+        
+        # Extract return content if there was an explicit return
+        return_content = None
+        try:
+            if explicit_return and result_nodes:
+                # Extract content directly from nodes
+                if hasattr(result_nodes, 'parser') and result_nodes.parser.nodes:
+                    content_parts = []
+                    try:
+                        current = result_nodes.first()
+                        while current:
+                            if hasattr(current, 'content') and current.content:
+                                # Format content similar to render_ast_to_markdown
+                                formatted_content = '\n'.join(current.content.splitlines()) + '\n'
+                                content_parts.append(formatted_content)
+                            current = current.next
+                        
+                        if content_parts:
+                            return_content = ''.join(content_parts)
+                    except Exception as e:
+                        print(f"DEBUG: Error in content extraction: {e}")
+        except Exception as e:
+            print(f"DEBUG: Exception in return content extraction: {e}")
+        
+        # Save call tree
+        call_tree_path = os.path.join('.', 'call_tree.json')
+        
+        with open(call_tree_path, 'w', encoding='utf-8') as json_file:
+            call_tree_root.ctx_file = ctx_file
+            call_tree_root.ctx_hash = ctx_hash
+            call_tree_root.trc_file = trc_file  
+            call_tree_root.trc_hash = trc_hash  
+            json_file.write(call_tree_root.to_json())
+        
+        # Commit the call_tree.json file
+        md_commit_hash = commit_changes(
+            '.',  # Current directory (which is the input file's directory)
+            "Saving call_tree.json",
+            [call_tree_path],
+            None,
+            None
+        )
+        
+        # Build output
+        output = f"Execution completed. Branch: {branch_name}, Context: {ctx_hash}"
+        
+        return {
+            'success': True,
+            'output': output,
+            'explicit_return': explicit_return,
+            'return_content': return_content,
+            'branch_name': branch_name,
+            'ctx_file': ctx_file,
+            'ctx_hash': ctx_hash
+        }
+        
+    except (BlockNotFoundError, UnknownOperationError, FileNotFoundError, ValueError) as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'output': '',
+            'explicit_return': False,
+            'return_content': None,
+            'branch_name': None
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f"Unexpected error: {str(e)}",
+            'output': '',
+            'explicit_return': False,
+            'return_content': None,
+            'branch_name': None
+        }
+    finally:
+        # Restore original working directory
+        os.chdir(original_cwd)
 
-    # use the section name (anthropic/openrouter/openai) as provider
-    provider = model_key
-
-    provider_settings = all_models[model_key]
-    # ensure downstream sees the actual model name (with dots if present)
-    provider_settings = {
-        **provider_settings,
-        "model": provider_settings.get("model", model_key),
-    }
-
-    api_key = (
-        args.api_key
-        or provider_settings.get("apiKey")
-       # or os.getenv(PROVIDER_API_KEYS[provider])
-    )
-    return provider, api_key, provider_settings
 
 def _mask_key(key: str) -> str:
     if not key:
@@ -94,6 +268,7 @@ def _mask_key(key: str) -> str:
     if len(key) <= 8:
         return "*" * len(key)
     return key[:4] + "*" * (10) + key[-4:]
+
 
 def enable_rich_terminal_features():
     """Comprehensive test function to check Rich terminal capabilities for xterm."""
@@ -103,10 +278,10 @@ def enable_rich_terminal_features():
     os.environ['FORCE_COLOR'] = '1'
     if 'NO_COLOR' in os.environ:
         del os.environ['NO_COLOR']
-    
-    
+
 
 def main():
+    """Main function - thin wrapper that handles argument parsing and calls run_fractalic"""
     # Test Rich terminal capabilities first
     enable_rich_terminal_features()
     
@@ -133,19 +308,21 @@ def main():
     args = parser.parse_args()
 
     try:
-        provider, api_key, provider_settings = setup_provider_config(args, settings)
+        # Call the core execution function
+        result = run_fractalic(
+            input_file=args.input_file,
+            task_file=args.task_file,
+            param_input_user_request=args.param_input_user_request,
+            model=args.model,
+            api_key=args.api_key,
+            operation=args.operation,
+            show_operations=args.show_operations
+        )
         
-        # Update TOML settings if show-operations flag is explicitly set
-        if args.show_operations:
-            if 'settings' not in settings:
-                settings['settings'] = {}
-            settings['settings']['enableOperationsVisibility'] = True
+        if not result['success']:
+            print(f"[ERROR fractalic.py] {result['error']}")
+            sys.exit(1)
         
-        Config.TOML_SETTINGS = settings
-        Config.LLM_PROVIDER = provider
-        Config.API_KEY = api_key
-        Config.DEFAULT_OPERATION = args.operation
-
         # Use same force settings as test function for consistency
         console = Console(
             force_terminal=True, 
@@ -154,73 +331,51 @@ def main():
             legacy_windows=False
         )
 
-        # show masked key and its source with icons
-        masked = _mask_key(api_key)
-        source = "CLI argument" if args.api_key else "settings.toml"
-        console.print(f"[bright_green]✓[/bright_green] Using provider [bold]{provider}[/bold], model [bold]{provider_settings.get('model')}[/bold]")
-        console.print(f"[bright_green]✓[/bright_green] API key [bold]{masked}[/bold] (from {source})")
-
-        os.environ[f"{provider.upper()}_API_KEY"] = api_key
-
-        if not os.path.exists(args.input_file):
-            raise FileNotFoundError(f"Input file not found: {args.input_file}")
-
-        if args.task_file and args.param_input_user_request:
-            if not os.path.exists(args.task_file):
-                raise FileNotFoundError(f"Task file not found: {args.task_file}")
-                
-            temp_ast = parse_file(args.task_file)
-            param_node = temp_ast.get_part_by_path(args.param_input_user_request, True)
-            result_nodes, call_tree_root, ctx_file, ctx_hash, trc_file, trc_hash, branch_name, explicit_return = run(
-                args.input_file,
-                param_node,
-                p_call_tree_node=None
-            )
+        # Extract provider info for display (we need to re-calculate this for console output)
+        raw_model = args.model or settings.get("defaultProvider")
+        all_models = settings.get("settings", {})
+        model_key = None
+        
+        if raw_model in all_models:
+            model_key = raw_model
         else:
-            result_nodes, call_tree_root, ctx_file, ctx_hash, trc_file, trc_hash, branch_name, explicit_return = run(
-                args.input_file,
-                p_call_tree_node=None
-            )
-
-        # Save call tree
-        abs_path = os.path.abspath(args.input_file)
-        file_dir = os.path.dirname(abs_path)
-        call_tree_path = os.path.join(file_dir, 'call_tree.json')
-
-        with open(call_tree_path, 'w', encoding='utf-8') as json_file:
-            call_tree_root.ctx_file = ctx_file
-            call_tree_root.ctx_hash = ctx_hash
-            call_tree_root.trc_file = trc_file  
-            call_tree_root.trc_hash = trc_hash  
-            json_file.write(call_tree_root.to_json())
-
-        md_commit_hash = commit_changes(
-            file_dir,
-            "Saving call_tree.json",
-            [call_tree_path],
-            None,
-            None
-        )
+            for key, conf in all_models.items():
+                name = conf.get("model", key)
+                if raw_model == name \
+                   or raw_model == name.replace(".", "-") \
+                   or raw_model == name.replace(".", "_"):
+                    model_key = key
+                    break
+            if model_key is None:
+                for alt in (raw_model.replace(".", "-"), raw_model.replace(".", "_")):
+                    if alt in all_models:
+                        model_key = alt
+                        break
+        
+        if model_key:
+            provider_settings = all_models[model_key]
+            final_api_key = args.api_key or provider_settings.get("apiKey")
+            
+            # show masked key and its source with icons
+            masked = _mask_key(final_api_key)
+            source = "CLI argument" if args.api_key else "settings.toml"
+            console.print(f"[bright_green]✓[/bright_green] Using provider [bold]{model_key}[/bold], model [bold]{provider_settings.get('model')}[/bold]")
+            console.print(f"[bright_green]✓[/bright_green] API key [bold]{masked}[/bold] (from {source})")
 
         # Send message to UI for branch information
-        print(f"[EventMessage: Root-Context-Saved] ID: {branch_name}, {ctx_hash}")
+        print(f"[EventMessage: Root-Context-Saved] ID: {result['branch_name']}, {result['ctx_hash']}")
         
         # Log information about how the workflow completed
-        if explicit_return:
+        if result['explicit_return']:
             print(f"[EventMessage: Execution-Mode] Explicit @return operation")
-            print(f"[EventMessage: Return-Nodes-Count] {len(result_nodes.parser.nodes)}")
             
             # Print the content of the returned AST
             print("\n[EventMessage: Return-Content-Start]")
-            # Print each node's content in sequence
-            current_node = result_nodes.first()
-            while current_node:
-                print(current_node.content)
-                current_node = current_node.next
+            if result['return_content']:
+                print(result['return_content'])
             print("[EventMessage: Return-Content-End]\n")
         else:
             print(f"[EventMessage: Execution-Mode] Natural workflow completion")
-            # No need to print the full AST for natural completion as it's already in the .ctx file
 
     except (BlockNotFoundError, UnknownOperationError, FileNotFoundError, ValueError) as e:
         print(f"[ERROR fractalic.py] {str(e)}")
@@ -231,8 +386,8 @@ def main():
         filename, line_no, func_name, text = tb[-1]  # Get the last frame (where error originated)
         print(f"[ERROR][Unexpected] {exc_type.__name__} in module {filename}, line {line_no}: {str(e)}")
         traceback.print_exc()
-
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
