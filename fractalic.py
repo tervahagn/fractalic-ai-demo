@@ -55,7 +55,7 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
         show_operations: Make operations visible to LLM
     
     Returns:
-        dict: Execution result with success status, output, and return information
+        dict: Execution result with success status, output, return information, and provider details
     """
     original_cwd = os.getcwd()
     
@@ -78,7 +78,8 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
                 'output': '',
                 'explicit_return': False,
                 'return_content': None,
-                'branch_name': None
+                'branch_name': None,
+                'provider_info': None
             }
 
         all_models = settings.get("settings", {})
@@ -110,7 +111,8 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
                 'output': '',
                 'explicit_return': False,
                 'return_content': None,
-                'branch_name': None
+                'branch_name': None,
+                'provider_info': None
             }
 
         # use the section name (anthropic/openrouter/openai) as provider
@@ -131,7 +133,8 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
                 'output': '',
                 'explicit_return': False,
                 'return_content': None,
-                'branch_name': None
+                'branch_name': None,
+                'provider_info': None
             }
         
         # Configure globals
@@ -159,7 +162,8 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
                 'output': '',
                 'explicit_return': False,
                 'return_content': None,
-                'branch_name': None
+                'branch_name': None,
+                'provider_info': None
             }
         
         # Handle parameter injection if provided
@@ -172,7 +176,8 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
                     'output': '',
                     'explicit_return': False,
                     'return_content': None,
-                    'branch_name': None
+                    'branch_name': None,
+                    'provider_info': None
                 }
             temp_ast = parse_file(task_file)
             param_node = temp_ast.get_part_by_path(param_input_user_request, True)
@@ -236,7 +241,14 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
             'return_content': return_content,
             'branch_name': branch_name,
             'ctx_file': ctx_file,
-            'ctx_hash': ctx_hash
+            'ctx_hash': ctx_hash,
+            # Include provider information for console display
+            'provider_info': {
+                'model_key': model_key,
+                'model_name': provider_settings.get('model'),
+                'api_key': final_api_key,
+                'api_key_source': 'CLI argument' if api_key else 'settings.toml'
+            }
         }
         
     except (BlockNotFoundError, UnknownOperationError, FileNotFoundError, ValueError) as e:
@@ -246,7 +258,8 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
             'output': '',
             'explicit_return': False,
             'return_content': None,
-            'branch_name': None
+            'branch_name': None,
+            'provider_info': None
         }
     except Exception as e:
         return {
@@ -255,7 +268,8 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
             'output': '',
             'explicit_return': False,
             'return_content': None,
-            'branch_name': None
+            'branch_name': None,
+            'provider_info': None
         }
     finally:
         # Restore original working directory
@@ -285,11 +299,6 @@ def main():
     # Test Rich terminal capabilities first
     enable_rich_terminal_features()
     
-    settings = load_settings()  # Load settings.toml once
-    
-    default_provider = settings.get('defaultProvider', 'openai')
-    default_operation = settings.get('defaultOperation', 'append')
-
     parser = argparse.ArgumentParser(description="Process and run operations on a markdown file.")
     parser.add_argument('input_file', type=str, help='Path to the input markdown file.')
     parser.add_argument('--task_file', type=str, help='Path to the task markdown file.')
@@ -299,7 +308,7 @@ def main():
         help="LLM model to use (overrides settings.defaultProvider)"
     )
     parser.add_argument('--operation', type=str, help='Default operation to perform',
-                       default=default_operation)
+                       default='append')
     parser.add_argument('--param_input_user_request', type=str,
                        help='Part path for ParamInput-UserRequest', default=None)
     parser.add_argument('-v', '--show-operations', action='store_true',
@@ -331,36 +340,13 @@ def main():
             legacy_windows=False
         )
 
-        # Extract provider info for display (we need to re-calculate this for console output)
-        raw_model = args.model or settings.get("defaultProvider")
-        all_models = settings.get("settings", {})
-        model_key = None
-        
-        if raw_model in all_models:
-            model_key = raw_model
-        else:
-            for key, conf in all_models.items():
-                name = conf.get("model", key)
-                if raw_model == name \
-                   or raw_model == name.replace(".", "-") \
-                   or raw_model == name.replace(".", "_"):
-                    model_key = key
-                    break
-            if model_key is None:
-                for alt in (raw_model.replace(".", "-"), raw_model.replace(".", "_")):
-                    if alt in all_models:
-                        model_key = alt
-                        break
-        
-        if model_key:
-            provider_settings = all_models[model_key]
-            final_api_key = args.api_key or provider_settings.get("apiKey")
+        # Display provider information if available
+        if result.get('provider_info'):
+            provider_info = result['provider_info']
+            masked_key = _mask_key(provider_info['api_key'])
             
-            # show masked key and its source with icons
-            masked = _mask_key(final_api_key)
-            source = "CLI argument" if args.api_key else "settings.toml"
-            console.print(f"[bright_green]✓[/bright_green] Using provider [bold]{model_key}[/bold], model [bold]{provider_settings.get('model')}[/bold]")
-            console.print(f"[bright_green]✓[/bright_green] API key [bold]{masked}[/bold] (from {source})")
+            console.print(f"[bright_green]✓[/bright_green] Using provider [bold]{provider_info['model_key']}[/bold], model [bold]{provider_info['model_name']}[/bold]")
+            console.print(f"[bright_green]✓[/bright_green] API key [bold]{masked_key}[/bold] (from {provider_info['api_key_source']})")
 
         # Send message to UI for branch information
         print(f"[EventMessage: Root-Context-Saved] ID: {result['branch_name']}, {result['ctx_hash']}")
