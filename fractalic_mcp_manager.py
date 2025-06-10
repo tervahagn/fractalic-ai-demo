@@ -1254,6 +1254,8 @@ def build_app(sup: Supervisor, stop_event: asyncio.Event):
     app.router.add_post("/start/{n}",   lambda r: _mut(r, sup, "start"))
     app.router.add_post("/stop/{n}",    lambda r: _mut(r, sup, "stop"))
     app.router.add_post("/call_tool",   lambda r: _call(r, sup))
+    app.router.add_post("/add_server",  lambda r: _add_server(r, sup))
+    app.router.add_post("/delete_server", lambda r: _delete_server(r, sup))
     app.router.add_post("/kill",        lambda r: _kill(r, sup, stop_event))
     
     # Configure CORS for all routes
@@ -1277,6 +1279,283 @@ async def _call(req, sup):
     res  = await sup.call_tool(body["name"], body.get("arguments", {}))
     return web.json_response(res, dumps=lambda obj: json.dumps(obj, cls=MCPEncoder))
 
+async def _add_server(req, sup: Supervisor):
+    """Add a new MCP server configuration"""
+    try:
+        body = await req.json()
+        
+        # Handle case where frontend sends JSON as a string in jsonConfig field
+        if "jsonConfig" in body and isinstance(body["jsonConfig"], str):
+            try:
+                # Parse the JSON string to get the actual configuration
+                body = json.loads(body["jsonConfig"])
+            except json.JSONDecodeError as e:
+                return web.json_response(
+                    {"success": False, "error": "Fractalic MCP manager: Invalid JSON in jsonConfig field"}, 
+                    status=400,
+                    dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+                )
+        
+        # Handle different JSON formats from frontend
+        if "mcpServers" in body and isinstance(body["mcpServers"], dict):
+            # Format: {"mcpServers": {"server-name": {...}}}
+            servers = body["mcpServers"]
+            if len(servers) != 1:
+                return web.json_response(
+                    {"success": False, "error": "Fractalic MCP manager: When using mcpServers format, exactly one server must be provided"}, 
+                    status=400,
+                    dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+                )
+            
+            # Extract the server name and config from the nested structure
+            server_name, server_config = next(iter(servers.items()))
+            name = server_name
+            # For nested format, the entire server_config becomes our config
+            # and we need to extract URL if it exists, or build it from config
+            if "url" in server_config:
+                url = server_config["url"]
+                config = {k: v for k, v in server_config.items() if k != "url"}
+            else:
+                # For non-HTTP servers (stdio), there's no URL
+                config = server_config
+                url = None
+        elif "mcp" in body and isinstance(body["mcp"], dict) and "servers" in body["mcp"] and isinstance(body["mcp"]["servers"], dict):
+            # Format: {"mcp": {"servers": {"server-name": {...}}}}
+            servers = body["mcp"]["servers"]
+            if len(servers) != 1:
+                return web.json_response(
+                    {"success": False, "error": "Fractalic MCP manager: When using mcp.servers format, exactly one server must be provided"}, 
+                    status=400,
+                    dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+                )
+            
+            # Extract the server name and config from the nested structure
+            server_name, server_config = next(iter(servers.items()))
+            name = server_name
+            # For nested format, the entire server_config becomes our config
+            # and we need to extract URL if it exists, or build it from config
+            if "url" in server_config:
+                url = server_config["url"]
+                config = {k: v for k, v in server_config.items() if k != "url"}
+            else:
+                # For non-HTTP servers (stdio), there's no URL
+                config = server_config
+                url = None
+        else:
+            # Standard format with name, url, and config at top level
+            name = body.get("name")
+            url = body.get("url")
+            config = body.get("config", {})
+            
+            # Validate required fields for standard format
+            if not name:
+                return web.json_response(
+                    {"success": False, "error": "Fractalic MCP manager: Server name is required"}, 
+                    status=400,
+                    dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+                )
+            
+            # For standard format, URL is required (mcpServers format allows stdio servers without URL)
+            if not url:
+                return web.json_response(
+                    {"success": False, "error": "Fractalic MCP manager: Server URL is required"}, 
+                    status=400,
+                    dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+                )
+        
+        # Read current configuration
+        try:
+            current_config = json.loads(CONF_PATH.read_text())
+        except Exception as e:
+            return web.json_response(
+                {"success": False, "error": f"Fractalic MCP manager: Failed to read server configuration: {str(e)}"}, 
+                status=500,
+                dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+            )
+        
+        # Check for duplicate names
+        if name in current_config.get("mcpServers", {}):
+            return web.json_response(
+                {"success": False, "error": f"Fractalic MCP manager: Server with name '{name}' already exists"}, 
+                status=409,
+                dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+            )
+        
+        # Prepare server configuration
+        server_config = {}
+        
+        # Add URL if provided (for HTTP servers)
+        if url:
+            server_config["url"] = url
+        
+        # Add other configuration parameters
+        if config:
+            # Handle different config types
+            config_type = config.get("type", "manual")
+            transport = config.get("transport", "http" if url else "stdio")
+            auth = config.get("auth")
+            capabilities = config.get("capabilities", [])
+            
+            # For stdio servers, we need command and args
+            if transport == "stdio" or not url:
+                if "command" in config:
+                    server_config["command"] = config["command"]
+                if "args" in config:
+                    server_config["args"] = config["args"]
+                if "env" in config:
+                    server_config["env"] = config["env"]
+            
+            # Add transport if specified
+            if transport and transport != "http":
+                server_config["transport"] = transport
+            
+            # Add auth if provided
+            if auth:
+                server_config["auth"] = auth
+            
+            # Add any other config parameters that aren't handled above
+            for key, value in config.items():
+                if key not in ["type", "transport", "auth", "capabilities", "command", "args", "env"]:
+                    server_config[key] = value
+        
+        # Add server to configuration
+        if "mcpServers" not in current_config:
+            current_config["mcpServers"] = {}
+        
+        current_config["mcpServers"][name] = server_config
+        
+        # Save updated configuration
+        try:
+            CONF_PATH.write_text(json.dumps(current_config, indent=2))
+        except Exception as e:
+            return web.json_response(
+                {"success": False, "error": f"Fractalic MCP manager: Failed to save server configuration: {str(e)}"}, 
+                status=500,
+                dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+            )
+        
+        # Log the operation
+        log(f"Added new MCP server '{name}' with config: {server_config}")
+        
+        # Return success response
+        response_data = {
+            "success": True,
+            "message": "Fractalic MCP manager: Server added successfully",
+            "server": {
+                "name": name,
+                "url": url,
+                "config": server_config,
+                "added_at": datetime.datetime.now().isoformat()
+            }
+        }
+        
+        return web.json_response(
+            response_data, 
+            status=201,
+            dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+        )
+        
+    except json.JSONDecodeError:
+        return web.json_response(
+            {"success": False, "error": "Fractalic MCP manager: Invalid JSON in request body"}, 
+            status=400,
+            dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+        )
+    except Exception as e:
+        log(f"Error adding server: {str(e)}")
+        return web.json_response(
+            {"success": False, "error": f"Fractalic MCP manager: Internal server error: {str(e)}"}, 
+            status=500,
+            dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+        )
+
+async def _delete_server(req, sup: Supervisor):
+    """Delete an MCP server configuration"""
+    try:
+        # Get server name from request body
+        body = await req.json()
+        name = body.get("name")
+        
+        if not name:
+            return web.json_response(
+                {"success": False, "error": "Fractalic MCP manager: Server name is required"}, 
+                status=400,
+                dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+            )
+        
+        # Read current configuration
+        try:
+            current_config = json.loads(CONF_PATH.read_text())
+        except Exception as e:
+            return web.json_response(
+                {"success": False, "error": f"Fractalic MCP manager: Failed to read server configuration: {str(e)}"}, 
+                status=500,
+                dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+            )
+        
+        # Check if server exists
+        if name not in current_config.get("mcpServers", {}):
+            return web.json_response(
+                {"success": False, "error": f"Fractalic MCP manager: Server '{name}' not found"}, 
+                status=404,
+                dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+            )
+        
+        # Stop the server if it's running
+        try:
+            if name in sup.children:
+                child = sup.children[name]
+                await child.cleanup()  # Stop and clean up the server
+                log(f"Stopped running server '{name}' before deletion")
+        except Exception as e:
+            log(f"Warning: Failed to stop server '{name}' before deletion: {e}")
+            # Continue with deletion even if stopping fails
+        
+        # Remove server from configuration
+        server_config = current_config["mcpServers"].pop(name)
+        
+        # Save updated configuration
+        try:
+            CONF_PATH.write_text(json.dumps(current_config, indent=2))
+        except Exception as e:
+            return web.json_response(
+                {"success": False, "error": f"Fractalic MCP manager: Failed to save server configuration: {str(e)}"}, 
+                status=500,
+                dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+            )
+        
+        # Remove from supervisor's children if present
+        if name in sup.children:
+            del sup.children[name]
+        
+        # Log the operation
+        log(f"Deleted MCP server '{name}' with config: {server_config}")
+        
+        # Return success response
+        response_data = {
+            "success": True,
+            "message": "Fractalic MCP manager: Server deleted successfully",
+            "server": {
+                "name": name,
+                "config": server_config,
+                "deleted_at": datetime.datetime.now().isoformat()
+            }
+        }
+        
+        return web.json_response(
+            response_data, 
+            status=200,
+            dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+        )
+        
+    except Exception as e:
+        log(f"Error deleting server: {str(e)}")
+        return web.json_response(
+            {"success": False, "error": f"Fractalic MCP manager: Internal server error: {str(e)}"}, 
+            status=500,
+            dumps=lambda obj: json.dumps(obj, cls=MCPEncoder)
+        )
+
 async def _kill(req, sup: Supervisor, stop_ev: asyncio.Event):
     # Respond immediately, then trigger shutdown asynchronously
     async def delayed_shutdown():
@@ -1291,7 +1570,7 @@ async def _kill(req, sup: Supervisor, stop_ev: asyncio.Event):
     asyncio.create_task(delayed_shutdown())
     
     # Return response immediately
-    return web.json_response({"status": "shutting-down"}, dumps=lambda obj: json.dumps(obj, cls=MCPEncoder))
+    return web.json_response({"status": "Fractalic MCP manager: shutting-down"}, dumps=lambda obj: json.dumps(obj, cls=MCPEncoder))
 
 # ==================================================================== runners
 async def run_serve(port: int):
