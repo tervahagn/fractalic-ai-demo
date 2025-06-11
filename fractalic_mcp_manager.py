@@ -1437,10 +1437,30 @@ async def _add_server(req, sup: Supervisor):
         # Log the operation
         log(f"Added new MCP server '{name}' with config: {server_config}")
         
-        # Return success response
+        # DYNAMIC SERVER LAUNCH: Create and start the new server immediately
+        try:
+            # Create new Child object for the server
+            new_child = Child(name, server_config)
+            
+            # Add to supervisor's children dictionary
+            sup.children[name] = new_child
+            
+            # Start the server in background (non-blocking)
+            asyncio.create_task(new_child.start())
+            
+            log(f"Fractalic MCP manager: Launched new server '{name}' dynamically")
+            launch_status = "launched"
+            
+        except Exception as launch_error:
+            # If dynamic launch fails, log but still return success since config was saved
+            log(f"Fractalic MCP manager: Failed to launch '{name}' dynamically: {launch_error}")
+            launch_status = "config_saved_only"
+        
+        # Return success response with launch status
         response_data = {
             "success": True,
             "message": "Fractalic MCP manager: Server added successfully",
+            "launch_status": launch_status,
             "server": {
                 "name": name,
                 "url": url,
