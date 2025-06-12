@@ -302,11 +302,59 @@ class liteclient:
         elif tools_param == "all":
             # Use all tools - copy the entire schema
             params["tools"] = self.schema.copy()
+        elif isinstance(tools_param, str) and tools_param.startswith("mcp/"):
+            # Single MCP server filter
+            mcp_server_name = tools_param[4:]  # Remove the mcp/ prefix
+            filtered_schema = []
+            
+            for tool in self.schema:
+                tool_name = tool["function"]["name"]
+                
+                # Check if this tool has MCP metadata and matches the server name
+                if hasattr(self, 'registry') and self.registry:
+                    for manifest in self.registry._manifests:
+                        if (manifest.get("name") == tool_name and 
+                            manifest.get("_service", "").lower() == mcp_server_name.lower()):
+                            filtered_schema.append(tool)
+                            break
+            
+            params["tools"] = filtered_schema
         elif isinstance(tools_param, list):
             # Filter tools based on the provided list - create new list with matching tools
+            # Support both individual tool names and mcp/server-name patterns for MCP server filtering
+            filtered_schema = []
+            
+            for tool in self.schema:
+                tool_name = tool["function"]["name"]
+                should_include = False
+                
+                for filter_item in tools_param:
+                    if isinstance(filter_item, str):
+                        if filter_item.startswith("mcp/"):
+                            # MCP server filter - check if tool is from this MCP server
+                            mcp_server_name = filter_item[4:]  # Remove the mcp/ prefix
+                            
+                            # Check if this tool has MCP metadata and matches the server name
+                            if hasattr(self, 'registry') and self.registry:
+                                for manifest in self.registry._manifests:
+                                    if (manifest.get("name") == tool_name and 
+                                        manifest.get("_service", "").lower() == mcp_server_name.lower()):
+                                        should_include = True
+                                        break
+                        else:
+                            # Regular tool name filter
+                            if tool_name == filter_item:
+                                should_include = True
+                
+                if should_include:
+                    filtered_schema.append(tool)
+            
+            params["tools"] = filtered_schema
+        elif isinstance(tools_param, str):
+            # Single tool name filter (fallback for individual tool names)
             filtered_schema = [
                 tool for tool in self.schema 
-                if tool["function"]["name"] in tools_param
+                if tool["function"]["name"] == tools_param
             ]
             params["tools"] = filtered_schema
 

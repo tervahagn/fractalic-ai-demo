@@ -17,6 +17,13 @@ The `@llm` operation accepts several parameters:
 - `use-header`: Custom header for the response block
 - `mode`: How to insert response (`append`, `prepend`, `replace`)
 - `to`: Target block where response should be placed
+- `tools`: Control which tools are available to the LLM:
+  - `"none"`: No tools available (default, enables streaming)
+  - `"all"`: All available tools from local directory and MCP servers
+  - Array of tool names: `["tool1", "tool2"]` - specific tools only
+  - Array with MCP filters: `["tool1", "mcp/server-name", "tool2"]` - mix of specific tools and all tools from MCP servers
+  - `"mcp/server-name"` syntax includes all tools from the specified MCP server
+- `tools-turns-max`: Maximum number of tool calls allowed for this operation
 
 3. **Execution Flow**:
 ```mermaid

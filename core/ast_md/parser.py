@@ -122,7 +122,7 @@ operations:
             items:
               type: string
         default: "none"
-        description: "Specify which tools to use: 'none' for no tools (default), 'all' for all tools, or an array of specific tool names"
+        description: "Specify which tools to use: 'none' for no tools (default), 'all' for all tools, an array of specific tool names, or 'mcp/server-name' patterns to include all tools from specific MCP servers"
       tools-turns-max:
         type: integer
         description: "Maximum number of tool calls allowed for this @llm operation. If set, overrides the default or global tool call limit for this operation only."

@@ -150,7 +150,7 @@ Here's a detailed look at each standard Fractalic operation:
     | `temperature` | No       | Number (0-1)            | Controls the randomness of the LLM response (higher value means more random). Overrides the default.                                      | -        |
     | `run-once`    | No       | Boolean                 | If `true`, this specific `@llm` call will only happen the first time Fractalic encounters it *during a single workflow execution pass*.    | `false`  |
     | `stop-sequences` | No | List[String] | List of strings where the model should stop generation (for Anthropic models it maps to `stop_sequences` parameter). | - |
-    | `tools` | No | String/Array | Specify which tools to use: 'none' for no tools (default), 'all' for all tools, or an array of specific tool names. When set to 'none', streaming mode is automatically enabled. | "none" |
+    | `tools` | No | String/Array | Specify which tools to use: 'none' for no tools (default), 'all' for all tools, an array of specific tool names, or an array mixing tool names and '@mcpname' patterns to include all tools from specific MCP servers (e.g., ['tool1', '@playwright-mcp', 'tool2']). When set to 'none', streaming mode is automatically enabled. | "none" |
     | `tools-turns-max` | No | Integer | Maximum number of tool calls allowed for this @llm operation. If set, overrides the default or global tool call limit for this operation only. | - |
 *   **Constraint:** You must provide *at least one* of `prompt` or `block`.
 *   **Example:**
