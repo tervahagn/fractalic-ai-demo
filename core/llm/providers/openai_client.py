@@ -11,17 +11,16 @@ lite_client.py  —  Unified multimodal client (LiteLLM)
 """
 
 # ================= stdlib / deps =================
-import json, ast, inspect, logging, os, base64, imghdr
+import json, logging, os, base64, imghdr, re
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional
 
-from rich.console import Console
 from litellm import completion                          # chat-completions + Responses
 import openai                                           # raw SDK for file upload
-import requests
 import warnings
-from core.plugins.tool_registry import ToolRegistry  # NEW import
+from core.plugins.tool_registry import ToolRegistry    # NEW import
+from .rich_formatter import RichFormatter              # Rich functionality moved here
 
 warnings.filterwarnings(
     "ignore",
@@ -44,22 +43,35 @@ SUPPORTED_MEDIA_TYPES = {
 MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20 MB
 
 # ====================================================================
-#  Console
+#  Console Manager - delegates Rich functionality to RichFormatter
 # ====================================================================
 class ConsoleManager:
     def __init__(self):
-        self.c = Console()
+        self.formatter = RichFormatter()
 
     def show(self, role: str, content: str, end: str = "\n"):
-        colours = {"user": "cyan", "assistant": "green",
-                   "error": "red", "status": "dim"}
-        if role in colours:
-            self.c.print(f"[{colours[role]}]{role.upper()}:[/] {content}", end=end)
-        else:
-            self.c.print(content, highlight=False, end=end)
+        """Display content with role-based coloring"""
+        self.formatter.show(role, content, end)
 
-    def status(self, m): self.show("status", m)
-    def error(self, m):  self.show("error",  m)
+    def status(self, message: str):
+        """Display status message"""
+        self.formatter.status(message)
+    
+    def error(self, message: str):
+        """Display error message"""
+        self.formatter.error(message)
+
+    def format_json_clean(self, json_str: str) -> str:
+        """Format JSON string with proper indentation, no colors (for context)"""
+        return self.formatter.format_json_clean(json_str)
+
+    def format_json_colored(self, json_str: str) -> str:
+        """Format JSON string with Rich syntax highlighting for terminal display"""
+        return self.formatter.format_json_colored(json_str)
+
+    def format_json(self, json_str: str, title: str = "JSON") -> str:
+        """Format JSON string with proper indentation and nested JSON handling (clean version)"""
+        return self.formatter.format_json(json_str, title)
 
 # ====================================================================
 #  Tool executor
@@ -348,7 +360,6 @@ class liteclient:
                 
                 if should_include:
                     filtered_schema.append(tool)
-            
             params["tools"] = filtered_schema
         elif isinstance(tools_param, str):
             # Single tool name filter (fallback for individual tool names)
@@ -432,17 +443,44 @@ class liteclient:
                     args = tc["function"]["arguments"]
                     try:
                         parsed_args = json.loads(args) if args else {}
-                        call_log = (f"> TOOL CALL, id: {tc['id']}\n"
-                                    f"tool: {tc['function']['name']}\n"
-                                    f"args: {json.dumps(parsed_args, indent=2, ensure_ascii=False)}")
-                        self.ui.show("", call_log)
-                        convo.append(call_log or "")
+                        
+                        # Format args for display and context
+                        if args:
+                            colored_args = self.ui.format_json_colored(args)
+                            clean_args = self.ui.format_json_clean(args)
+                        else:
+                            colored_args = clean_args = "{}"
+                        
+                        # Display with colors
+                        call_log_display = (f"> TOOL CALL, id: {tc['id']}\n"
+                                          f"tool: {tc['function']['name']}\n"
+                                          f"args:\n{colored_args}")
+                        self.ui.show("", call_log_display)
+                        
+                        # Context with clean text
+                        call_log_context = (f"> TOOL CALL, id: {tc['id']}\n"
+                                          f"tool: {tc['function']['name']}\n"
+                                          f"args:\n{clean_args}")
+                        convo.append(call_log_context)
 
                         res = self.exec.execute(tc["function"]["name"], args)
-                        resp_log = (f"> TOOL RESPONSE, id: {tc['id']}\n"
-                                    f"response: {res}")
-                        self.ui.show("", resp_log)
-                        convo.append(resp_log or "")
+                        
+                        # Format response for display and context
+                        if res and (res.strip().startswith(('{', '['))):
+                            colored_response = self.ui.format_json_colored(res)
+                            clean_response = self.ui.format_json_clean(res)
+                        else:
+                            colored_response = clean_response = res or ""
+                        
+                        # Display with colors
+                        resp_log_display = (f"> TOOL RESPONSE, id: {tc['id']}\n"
+                                          f"response:\n{colored_response}")
+                        self.ui.show("", resp_log_display)
+                        
+                        # Context with clean text
+                        resp_log_context = (f"> TOOL RESPONSE, id: {tc['id']}\n"
+                                          f"response:\n{clean_response}")
+                        convo.append(resp_log_context)
 
                         hist.append({"role": "tool",
                                      "tool_call_id": tc["id"],
