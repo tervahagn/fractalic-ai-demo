@@ -317,10 +317,34 @@ class MCPEncoder(json.JSONEncoder):
         # Handle Pydantic models
         if hasattr(obj, "model_dump_json"):
             return json.loads(obj.model_dump_json())
+        # Handle ChatCompletion related objects
+        if hasattr(obj, '__class__') and 'ChatCompletion' in str(type(obj)):
+            return self._handle_chat_completion_object(obj)
         # Handle CallToolResult objects and other custom classes
         if hasattr(obj, "__dict__"):
             return obj.__dict__
-        return super().default(obj)
+        # Handle datetime objects
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat()
+        # Handle other non-serializable objects
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)  # Fallback to string representation
+    
+    def _handle_chat_completion_object(self, obj):
+        """Handle ChatCompletion related objects safely"""
+        try:
+            if hasattr(obj, 'model_dump'):
+                return obj.model_dump()
+            elif hasattr(obj, 'dict'):
+                return obj.dict()
+            elif hasattr(obj, '__dict__'):
+                return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
+            else:
+                return str(obj)
+        except Exception:
+            return str(obj)
 
 # -------------------------------------------------------------------- helpers
 def tool_to_obj(t):
