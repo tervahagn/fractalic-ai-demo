@@ -182,95 +182,170 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
             temp_ast = parse_file(task_file)
             param_node = temp_ast.get_part_by_path(param_input_user_request, True)
         
-        # Run the Fractalic script (use basename since we're in the correct directory)
-        result_nodes, call_tree_root, ctx_file, ctx_hash, trc_file, trc_hash, branch_name, explicit_return = run(
-            input_file_basename,
-            param_node,
-            p_call_tree_node=None
-        )
-        
-        # Extract return content if there was an explicit return
+        # Initialize variables for exception handling
+        result_nodes = None
+        call_tree_root = None
+        ctx_file = None
+        ctx_hash = None
+        trc_file = None
+        trc_hash = None
+        branch_name = None
+        explicit_return = False
         return_content = None
+        
         try:
-            if explicit_return and result_nodes:
-                # Extract content directly from nodes
-                if hasattr(result_nodes, 'parser') and result_nodes.parser.nodes:
-                    content_parts = []
-                    try:
-                        current = result_nodes.first()
-                        while current:
-                            if hasattr(current, 'content') and current.content:
-                                # Format content similar to render_ast_to_markdown
-                                formatted_content = '\n'.join(current.content.splitlines()) + '\n'
-                                content_parts.append(formatted_content)
-                            current = current.next
-                        
-                        if content_parts:
-                            return_content = ''.join(content_parts)
-                    except Exception as e:
-                        print(f"DEBUG: Error in content extraction: {e}")
+            # Run the Fractalic script (use basename since we're in the correct directory)
+            result_nodes, call_tree_root, ctx_file, ctx_hash, trc_file, trc_hash, branch_name, explicit_return = run(
+                input_file_basename,
+                param_node,
+                p_call_tree_node=None
+            )
+            
+            # Extract return content if there was an explicit return
+            try:
+                if explicit_return and result_nodes:
+                    # Extract content directly from nodes
+                    if hasattr(result_nodes, 'parser') and result_nodes.parser.nodes:
+                        content_parts = []
+                        try:
+                            current = result_nodes.first()
+                            while current:
+                                if hasattr(current, 'content') and current.content:
+                                    # Format content similar to render_ast_to_markdown
+                                    formatted_content = '\n'.join(current.content.splitlines()) + '\n'
+                                    content_parts.append(formatted_content)
+                                current = current.next
+                            
+                            if content_parts:
+                                return_content = ''.join(content_parts)
+                        except Exception as e:
+                            print(f"DEBUG: Error in content extraction: {e}")
+            except Exception as e:
+                print(f"DEBUG: Exception in return content extraction: {e}")
+                
+        except (BlockNotFoundError, UnknownOperationError, FileNotFoundError, ValueError) as e:
+            print(f"[ERROR] Known exception during execution: {str(e)}")
+            # Continue to save whatever state we have
         except Exception as e:
-            print(f"DEBUG: Exception in return content extraction: {e}")
+            print(f"[ERROR] Unexpected exception during execution: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            # Continue to save whatever state we have
         
-        # Save call tree
-        call_tree_path = os.path.join('.', 'call_tree.json')
+        # Save call tree regardless of success or failure - this captures the actual execution state
+        def save_call_tree_state():
+            call_tree_path = os.path.join('.', 'call_tree.json')
+            files_to_commit = [call_tree_path]
+            
+            try:
+                if call_tree_root is not None:
+                    # Save actual call tree state
+                    with open(call_tree_path, 'w', encoding='utf-8') as json_file:
+                        call_tree_root.ctx_file = ctx_file
+                        call_tree_root.ctx_hash = ctx_hash
+                        call_tree_root.trc_file = trc_file  
+                        call_tree_root.trc_hash = trc_hash  
+                        json_file.write(call_tree_root.to_json())
+                else:
+                    # Create minimal call tree if no execution happened
+                    from core.operations.call_tree import CallTreeNode
+                    minimal_call_tree = CallTreeNode(
+                        operation='@run',
+                        operation_src=None,
+                        filename=input_file_basename,
+                        ctx_file=ctx_file,
+                        trc_file=trc_file
+                    )
+                    with open(call_tree_path, 'w', encoding='utf-8') as json_file:
+                        json_file.write(minimal_call_tree.to_json())
+                
+                # Check for any uncommitted ctx/trc files and include them in commit
+                ctx_file_path = None
+                trc_file_path = None
+                if ctx_file:
+                    ctx_file_path = os.path.join('.', os.path.basename(ctx_file))
+                    if os.path.exists(ctx_file_path):
+                        files_to_commit.append(ctx_file_path)
+                
+                if trc_file:
+                    trc_file_path = os.path.join('.', os.path.basename(trc_file))
+                    if os.path.exists(trc_file_path):
+                        files_to_commit.append(trc_file_path)
+                
+                # Also check for ctx/trc files based on input filename
+                base_name = os.path.splitext(input_file_basename)[0]
+                potential_ctx = f"{base_name}.ctx"
+                potential_trc = f"{base_name}.trc"
+                
+                if os.path.exists(potential_ctx) and potential_ctx not in files_to_commit:
+                    files_to_commit.append(potential_ctx)
+                    
+                if os.path.exists(potential_trc) and potential_trc not in files_to_commit:
+                    files_to_commit.append(potential_trc)
+                        
+                # Commit all relevant files
+                try:
+                    md_commit_hash = commit_changes(
+                        '.',  # Current directory (which is the input file's directory)
+                        "Saving call_tree.json with execution state and any pending files",
+                        files_to_commit,
+                        None,
+                        None
+                    )
+                    print(f"[INFO] Call tree and files saved and committed: {', '.join(files_to_commit)}")
+                except Exception as commit_e:
+                    print(f"[WARNING] Files saved but commit failed: {commit_e}")
+                    
+            except Exception as save_e:
+                print(f"[ERROR] Failed to save call tree: {save_e}")
+                import traceback
+                traceback.print_exc()
         
-        with open(call_tree_path, 'w', encoding='utf-8') as json_file:
-            call_tree_root.ctx_file = ctx_file
-            call_tree_root.ctx_hash = ctx_hash
-            call_tree_root.trc_file = trc_file  
-            call_tree_root.trc_hash = trc_hash  
-            json_file.write(call_tree_root.to_json())
+        # Always save call tree state
+        save_call_tree_state()
         
-        # Commit the call_tree.json file
-        md_commit_hash = commit_changes(
-            '.',  # Current directory (which is the input file's directory)
-            "Saving call_tree.json",
-            [call_tree_path],
-            None,
-            None
-        )
+        # Determine if execution was successful
+        execution_successful = (result_nodes is not None and call_tree_root is not None)
         
-        # Build output
-        output = f"Execution completed. Branch: {branch_name}, Context: {ctx_hash}"
-        
-        return {
-            'success': True,
-            'output': output,
-            'explicit_return': explicit_return,
-            'return_content': return_content,
-            'branch_name': branch_name,
-            'ctx_file': ctx_file,
-            'ctx_hash': ctx_hash,
-            # Include provider information for console display
-            'provider_info': {
-                'model_key': model_key,
-                'model_name': provider_settings.get('model'),
-                'api_key': final_api_key,
-                'api_key_source': 'CLI argument' if api_key else 'settings.toml'
+        if execution_successful:
+            # Build success output
+            output = f"Execution completed. Branch: {branch_name}, Context: {ctx_hash}"
+            
+            return {
+                'success': True,
+                'output': output,
+                'explicit_return': explicit_return,
+                'return_content': return_content,
+                'branch_name': branch_name,
+                'ctx_file': ctx_file,
+                'ctx_hash': ctx_hash,
+                # Include provider information for console display
+                'provider_info': {
+                    'model_key': model_key,
+                    'model_name': provider_settings.get('model'),
+                    'api_key': final_api_key,
+                    'api_key_source': 'CLI argument' if api_key else 'settings.toml'
+                }
             }
-        }
-        
-    except (BlockNotFoundError, UnknownOperationError, FileNotFoundError, ValueError) as e:
-        return {
-            'success': False,
-            'error': str(e),
-            'output': '',
-            'explicit_return': False,
-            'return_content': None,
-            'branch_name': None,
-            'provider_info': None
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': f"Unexpected error: {str(e)}",
-            'output': '',
-            'explicit_return': False,
-            'return_content': None,
-            'branch_name': None,
-            'provider_info': None
-        }
+        else:
+            # Build failure output but still include partial state
+            error_msg = "Execution failed but call tree state was preserved"
+            return {
+                'success': False,
+                'error': error_msg,
+                'output': '',
+                'explicit_return': explicit_return,
+                'return_content': return_content,
+                'branch_name': branch_name,
+                'ctx_file': ctx_file,
+                'ctx_hash': ctx_hash,
+                'provider_info': {
+                    'model_key': model_key,
+                    'model_name': provider_settings.get('model'),
+                    'api_key': final_api_key,
+                    'api_key_source': 'CLI argument' if api_key else 'settings.toml'
+                }
+            }
     finally:
         # Restore original working directory
         os.chdir(original_cwd)
