@@ -21,7 +21,8 @@ class RichFormatter:
     """Handles Rich-based formatting for terminal output"""
     
     def __init__(self):
-        self.console = Console()
+        # Initialize console with proper width handling
+        self.console = Console(soft_wrap=True)
     
     def show(self, role: str, content: str, end: str = "\n"):
         """Display content with role-based coloring"""
@@ -29,14 +30,17 @@ class RichFormatter:
                    "error": "red", "status": "dim"}
         
         if role in colours:
-            self.console.print(f"[{colours[role]}]{role.upper()}:[/] {content}", end=end)
+            self.console.print(f"[{colours[role]}]{role.upper()}:[/] {content}", 
+                             end=end, soft_wrap=True)
         else:
             # Check if this is a tool call or response message
             if content.startswith("> TOOL CALL") or content.startswith("> TOOL RESPONSE"):
                 formatted_content = self._format_tool_message(content)
-                self.console.print(formatted_content, highlight=False, end=end)
+                self.console.print(formatted_content, highlight=False, end=end,
+                                 soft_wrap=True)
             else:
-                self.console.print(content, highlight=False, end=end)
+                self.console.print(content, highlight=False, end=end,
+                                 soft_wrap=True)
 
     def status(self, message: str):
         """Display status message"""
@@ -111,60 +115,50 @@ class RichFormatter:
     def format_json_colored(self, json_str: str) -> str:
         """Format JSON string with Rich syntax highlighting for terminal display
         
-        IMPORTANT: Rich Console automatically detects terminal width and fills lines
-        with background colors/padding to match that width. This breaks layout in
-        xterm and other resizable terminals. Solution:
-        
-        1. Use StringIO instead of terminal output to bypass width detection
-        2. Set force_terminal=False to prevent terminal feature detection
-        3. Use fixed width (80) to have predictable output
-        4. Aggressively strip trailing whitespace and background color codes
-        5. Use no_wrap=True and soft_wrap=False to prevent wrapping artifacts
-        
-        This ensures clean, colored JSON without layout-breaking artifacts.
+        Uses a wide fixed width to prevent truncation while maintaining syntax highlighting.
+        Frontend terminal width detection should be handled at the UI layer, not here.
         """
         try:
             # Get clean formatted JSON first
             clean_json = self.format_json_clean(json_str)
             
-            # Available themes (sorted by readability):
-            # Readable light themes: vs, default, github-dark, friendly, tango, colorful
-            # Readable dark themes: monokai, dracula, nord, nord-darker, gruvbox-dark, one-dark
-            # Minimal themes: bw (black/white), friendly_grayscale
-            # Custom themes: solarized-light, solarized-dark, material, zenburn
+            # Use a very wide fixed width to prevent truncation
+            # This ensures syntax highlighting works while avoiding truncation
+            # Frontend should handle responsive display if needed
+            width = 300  # Wide enough for most JSON content
             
-            # Create a minimal console that renders without width padding
+            # Create a console that renders with syntax highlighting
             string_output = StringIO()
             console = Console(
-                file=string_output,        # Output to StringIO
-                width=80,                  # Reasonable fixed width
-                force_terminal=True,       # Force terminal mode to enable colors
-                no_color=False,            # Allow colors
-                legacy_windows=False       # Modern support
+                file=string_output,
+                width=width,
+                force_terminal=True,
+                no_color=False,
+                legacy_windows=False
             )
             
-            # Use default theme which is most predictable
+            # Create syntax highlighting
             syntax = Syntax(
-                clean_json, 
-                "json", 
-                theme="github-dark",        # GitHub Dark theme - no forced backgrounds
-                background_color=None,      # No background
-                line_numbers=False,         # No line numbers
-                word_wrap=False,            # No word wrapping
-                padding=0                   # No padding
+                clean_json,
+                "json",
+                theme="github-dark",
+                background_color=None,
+                line_numbers=False,
+                word_wrap=False,  # Disable to prevent Rich's problematic wrapping
+                padding=0
             )
             
-            # Render to StringIO
-            console.print(syntax, end="", soft_wrap=False, no_wrap=True)
+            # Render with syntax highlighting
+            console.print(syntax, end="")
             result = string_output.getvalue()
             
-            # Aggressively clean up padding and background artifacts
+            # Clean up ANSI artifacts
             result = self._clean_ansi_artifacts(result)
             
             return result
             
         except Exception:
-            # Fallback to clean formatting if syntax highlighting fails
+            # Fallback to clean formatting only if syntax highlighting completely fails
             return self.format_json_clean(json_str)
 
     def _clean_ansi_artifacts(self, text: str) -> str:
@@ -187,22 +181,19 @@ class RichFormatter:
         result = re.sub(r'\x1b\[49m', '', result)
         
         # Remove excessive trailing whitespace that Rich adds for width filling
+        # BUT be less aggressive to avoid truncating actual content
         lines = result.split('\n')
         cleaned_lines = []
         for line in lines:
-            # More aggressive cleanup: remove trailing spaces AND reset codes
-            # Pattern: remove spaces and reset codes from the end
-            cleaned = re.sub(r'[\s\x1b\[0m]*$', '', line)
-            # If the line still has content after aggressive cleanup, keep it
-            if cleaned.strip():
-                cleaned_lines.append(cleaned)
-            else:
-                # Empty line after cleanup
-                cleaned_lines.append('')
+            # Less aggressive cleanup: only remove trailing whitespace and reset codes
+            # but preserve the actual content
+            cleaned = re.sub(r'\s*\x1b\[0m\s*$', '', line)  # Remove reset codes and trailing spaces
+            cleaned = cleaned.rstrip()  # Remove any remaining trailing whitespace
+            cleaned_lines.append(cleaned)
         
         result = '\n'.join(cleaned_lines)
         
-        # Remove any completely empty trailing lines
+        # Remove any completely empty trailing lines (but preserve content)
         result = result.rstrip('\n')
         
         return result
