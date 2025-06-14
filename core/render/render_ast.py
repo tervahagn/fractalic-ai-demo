@@ -10,7 +10,53 @@ class NodeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, NodeType):
             return obj.value
-        return json.JSONEncoder.default(self, obj)
+        
+        # Handle OpenAI/LiteLLM objects that might be in the AST
+        if hasattr(obj, '__class__') and 'ChatCompletion' in obj.__class__.__name__:
+            try:
+                # Try to convert to dict if possible
+                if hasattr(obj, 'model_dump'):
+                    return obj.model_dump()
+                elif hasattr(obj, 'dict'):
+                    return obj.dict()
+                elif hasattr(obj, '__dict__'):
+                    return {key: self._safe_serialize(value) for key, value in obj.__dict__.items()}
+                else:
+                    return str(obj)
+            except Exception:
+                return str(obj)
+        
+        # Handle other pydantic/dataclass objects
+        if hasattr(obj, 'model_dump'):
+            try:
+                return obj.model_dump()
+            except Exception:
+                return str(obj)
+        elif hasattr(obj, 'dict'):
+            try:
+                return obj.dict()
+            except Exception:
+                return str(obj)
+        
+        # Handle datetime objects
+        if hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+            
+        # Default fallback - convert to string
+        try:
+            return str(obj)
+        except Exception:
+            return f"<unserializable {obj.__class__.__name__}>"
+    
+    def _safe_serialize(self, obj):
+        """Safely serialize an object, falling back to string representation"""
+        try:
+            # Try normal JSON serialization first
+            json.dumps(obj)
+            return obj
+        except (TypeError, ValueError):
+            # If that fails, use our custom serialization
+            return self.default(obj)
 
 # it soesnt grab header while using content
 

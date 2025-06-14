@@ -225,12 +225,14 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
                 
         except (BlockNotFoundError, UnknownOperationError, FileNotFoundError, ValueError) as e:
             print(f"[ERROR] Known exception during execution: {str(e)}")
-            # Continue to save whatever state we have
+            # These are handled exceptions that don't return useful data
+            # Continue to save whatever state we have (which will be None values)
         except Exception as e:
             print(f"[ERROR] Unexpected exception during execution: {str(e)}")
             import traceback
             traceback.print_exc()
-            # Continue to save whatever state we have
+            # For unexpected exceptions, the runner should have handled it and returned data
+            # But if we get here, the runner couldn't handle it, so variables remain None
         
         # Save call tree regardless of success or failure - this captures the actual execution state
         def save_call_tree_state():
