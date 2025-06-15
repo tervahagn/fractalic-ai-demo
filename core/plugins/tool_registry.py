@@ -27,6 +27,54 @@ from .cli_introspect import sniff as sniff_cli
 from .mcp_client import list_tools as mcp_list, call_tool as mcp_call
 from core.config import Config
 
+# Import sanitization function for Gemini compatibility
+def _sanitize_schema_for_gemini(schema: dict, max_depth: int = 6, current_depth: int = 0) -> dict:
+    """Sanitize JSON schema for Gemini/Vertex AI compatibility."""
+    if current_depth >= max_depth:
+        return {"type": "string", "description": "Complex nested data (simplified for compatibility)"}
+    
+    if not isinstance(schema, dict):
+        return schema
+    
+    sanitized = {}
+    
+    for key, value in schema.items():
+        if key == "type" and isinstance(value, list):
+            # Convert array types to single type - use first non-null type
+            non_null_types = [t for t in value if t != "null"]
+            sanitized[key] = non_null_types[0] if non_null_types else "string"
+        elif key == "format":
+            # Remove unsupported format fields for Vertex AI
+            if value in ["enum", "date-time"]:
+                sanitized[key] = value
+            # Skip unsupported formats by not adding them
+        elif key in ["anyOf", "oneOf"]:
+            # Replace with first option or fallback to string
+            if isinstance(value, list) and value:
+                first_option = value[0]
+                if isinstance(first_option, dict):
+                    sanitized.update(_sanitize_schema_for_gemini(first_option, max_depth, current_depth))
+                    continue
+            sanitized.update({"type": "string", "description": "Union type (simplified for compatibility)"})
+            continue
+        elif key == "properties" and isinstance(value, dict):
+            sanitized[key] = {}
+            for prop_name, prop_schema in value.items():
+                sanitized[key][prop_name] = _sanitize_schema_for_gemini(prop_schema, max_depth, current_depth + 1)
+        elif key == "items" and isinstance(value, dict):
+            sanitized[key] = _sanitize_schema_for_gemini(value, max_depth, current_depth + 1)
+        elif isinstance(value, dict):
+            sanitized[key] = _sanitize_schema_for_gemini(value, max_depth, current_depth + 1)
+        elif isinstance(value, list):
+            sanitized[key] = [
+                _sanitize_schema_for_gemini(item, max_depth, current_depth + 1) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            sanitized[key] = value
+    
+    return sanitized
+
 # Add the missing ToolParameterParser class
 class ToolParameterParser:
     """Convert tool parameters to command line arguments"""
@@ -71,11 +119,19 @@ class ToolRegistry(dict):
             # Skip invalid manifests
             if not isinstance(m, dict) or "name" not in m:
                 continue
+                
+            # Get the parameters and apply Gemini sanitization if needed
+            parameters = m.get("parameters", {"type": "object", "properties": {}})
+            
+            # Check if we're using a Gemini provider and sanitize accordingly
+            if hasattr(Config, 'LLM_PROVIDER') and Config.LLM_PROVIDER and 'gemini' in Config.LLM_PROVIDER.lower():
+                parameters = _sanitize_schema_for_gemini(parameters)
+            
             # Create the function schema
             function_schema = {
                 "name": m["name"],
                 "description": m.get("description", ""),
-                "parameters": m.get("parameters", {"type": "object", "properties": {}})
+                "parameters": parameters
             }
             # Add to schema list
             schema.append({
