@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from litellm import completion                          # chat-completions + Responses
+import litellm                                          # for stream_chunk_builder utility
 import openai                                           # raw SDK for file upload
 import warnings
 from core.plugins.tool_registry import ToolRegistry    # NEW import
@@ -93,7 +94,7 @@ class ToolExecutor:
             return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
 # ====================================================================
-#  Stream processor (trims stop-seq)
+#  Stream processor (trims stop-seq + handles tool calls)
 # ====================================================================
 class StreamProcessor:
     def __init__(self, ui: ConsoleManager, stop: Optional[List[str]]):
@@ -125,6 +126,137 @@ class StreamProcessor:
             self.ui.error(f"Streaming error: {e}")
             raise
         return buf or ""  # Ensure we always return a string, even if empty
+
+
+# ====================================================================
+#  Tool Call Stream processor (handles both content and tool calls)
+# ====================================================================
+class ToolCallStreamProcessor:
+    def __init__(self, ui: ConsoleManager, stop: Optional[List[str]]):
+        self.ui = ui
+        self.stop = stop or []
+        self.chunks = []
+        self.content_buffer = ""
+        self.last_chunk = ""
+        self.current_tool_calls = {}  # Track active tool calls by index
+        self.displayed_tool_names = set()  # Track which tool names we've already shown
+        
+    def process(self, stream_iter):
+        import litellm
+        
+        try:
+            for chunk in stream_iter:
+                self.chunks.append(chunk)
+                
+                # Handle finish_reason - stream is complete
+                if chunk.get("choices") and chunk["choices"][0].get("finish_reason"):
+                    break
+                    
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                
+                # Handle regular content streaming
+                content = delta.get("content", "")
+                if content:
+                    self.content_buffer += content
+                    # Apply stop sequence filtering
+                    display_content = content
+                    for s in self.stop:
+                        if self.content_buffer.endswith(s):
+                            self.content_buffer = self.content_buffer[:-len(s)]
+                            display_content = display_content[:-len(s)]
+                    
+                    if display_content:
+                        self.ui.show("", display_content, end="")
+                        self.last_chunk = display_content
+                
+                # Handle tool call streaming
+                tool_calls = delta.get("tool_calls", [])
+                if tool_calls:
+                    for tc_delta in tool_calls:
+                        index = tc_delta.get("index", 0)
+                        
+                        # Initialize tool call tracking for this index
+                        if index not in self.current_tool_calls:
+                            self.current_tool_calls[index] = {
+                                "id": None,
+                                "name": None,
+                                "arguments": ""
+                            }
+                        
+                        # Get tool call ID and name (usually in first chunk for this tool)
+                        if tc_delta.get("id"):
+                            self.current_tool_calls[index]["id"] = tc_delta["id"]
+                        
+                        if tc_delta.get("function", {}).get("name"):
+                            tool_name = tc_delta["function"]["name"]
+                            self.current_tool_calls[index]["name"] = tool_name
+                            
+                            # Display tool call initiation (only once per tool)
+                            if tool_name not in self.displayed_tool_names:
+                                self.ui.show("", f"\n🔧 Calling tool: {tool_name}")
+                                self.displayed_tool_names.add(tool_name)
+                        
+                        # Accumulate function arguments
+                        if tc_delta.get("function", {}).get("arguments"):
+                            args_chunk = tc_delta["function"]["arguments"]
+                            self.current_tool_calls[index]["arguments"] += args_chunk
+                            
+                            # Optionally stream the arguments as they come in
+                            # (You might want to disable this if the JSON becomes messy)
+                            # self.ui.show("", args_chunk, end="")
+                            
+            # Add final newline if we were streaming content
+            if self.content_buffer:
+                self.ui.show("", "")
+                
+        except Exception as e:
+            self.last_chunk = self.content_buffer
+            self.ui.error(f"Tool call streaming error: {e}")
+            raise
+            
+        # Reconstruct the complete message using LiteLLM's utility
+        if self.chunks:
+            try:
+                final_message = litellm.stream_chunk_builder(self.chunks)
+                return final_message
+            except Exception as e:
+                self.ui.error(f"Error reconstructing message: {e}")
+                # Fallback: create basic message structure
+                tool_calls_list = []
+                for idx, tc_info in self.current_tool_calls.items():
+                    if tc_info["id"] and tc_info["name"]:
+                        tool_calls_list.append({
+                            "id": tc_info["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc_info["name"],
+                                "arguments": tc_info["arguments"]
+                            }
+                        })
+                
+                # Create a mock response structure
+                class MockChoice:
+                    def __init__(self, content, tool_calls):
+                        self.message = type('obj', (object,), {
+                            'content': content,
+                            'tool_calls': tool_calls if tool_calls else None
+                        })()
+                
+                class MockResponse:
+                    def __init__(self, content, tool_calls):
+                        self.choices = [MockChoice(content, tool_calls)]
+                
+                return MockResponse(self.content_buffer, tool_calls_list)
+        
+        # If no chunks, return empty content
+        return type('obj', (object,), {
+            'choices': [type('obj', (object,), {
+                'message': type('obj', (object,), {
+                    'content': self.content_buffer,
+                    'tool_calls': None
+                })()
+            })()]
+        })()
 
 # ====================================================================
 #  Media helpers
@@ -249,9 +381,7 @@ class liteclient:
         self,
         prompt_text: Optional[str] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
-        operation_params: Optional[Dict[str, Any]] = None,
-        *,
-        stream: bool = False
+        operation_params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
 
         op = operation_params or {}
@@ -300,7 +430,6 @@ class liteclient:
             top_p=op.get("top_p", self.top_p),
             max_tokens=op.get("max_tokens", self.max_tokens),
             stop=op.get("stop_sequences"),
-            stream=stream,
             api_key= self.api_key
         )
 
@@ -314,12 +443,15 @@ class liteclient:
 
         # Handle tools parameter
         tools_param = op.get("tools", "none")
+        has_tools = tools_param != "none"
+        
         if tools_param == "none":
-            # No tools, ensure streaming is enabled
+            # No tools available
             params["stream"] = True
         elif tools_param == "all":
-            # Use all tools - copy the entire schema
+            # Use all tools  
             params["tools"] = self.schema.copy()
+            params["stream"] = True  # Enable streaming for tool calls too
         elif isinstance(tools_param, str) and tools_param.startswith("mcp/"):
             # Single MCP server filter
             mcp_server_name = tools_param[4:]  # Remove the mcp/ prefix
@@ -337,9 +469,9 @@ class liteclient:
                             break
             
             params["tools"] = filtered_schema
+            params["stream"] = True  # Enable streaming for tool calls too
         elif isinstance(tools_param, list):
-            # Filter tools based on the provided list - create new list with matching tools
-            # Support both individual tool names and mcp/server-name patterns for MCP server filtering
+            # Filter tools based on the provided list
             filtered_schema = []
             
             for tool in self.schema:
@@ -349,7 +481,7 @@ class liteclient:
                 for filter_item in tools_param:
                     if isinstance(filter_item, str):
                         if filter_item.startswith("mcp/"):
-                            # MCP server filter - check if tool is from this MCP server
+                            # MCP server filter
                             mcp_server_name = filter_item[4:]  # Remove the mcp/ prefix
                             
                             # Check if this tool has MCP metadata and matches the server name
@@ -367,13 +499,15 @@ class liteclient:
                 if should_include:
                     filtered_schema.append(tool)
             params["tools"] = filtered_schema
+            params["stream"] = True  # Enable streaming for tool calls too
         elif isinstance(tools_param, str):
-            # Single tool name filter (fallback for individual tool names)
+            # Single tool name filter
             filtered_schema = [
                 tool for tool in self.schema 
                 if tool["function"]["name"] == tools_param
             ]
             params["tools"] = filtered_schema
+            params["stream"] = True  # Enable streaming for tool calls too
 
         # ----- build messages -----
         if messages:
@@ -409,73 +543,64 @@ class liteclient:
         max_turns = op.get("tools-turns-max", self.max_tool_turns)
         try:
             for turn_count in range(max_turns):
-                if stream:
+                # Always use streaming now, but with different processors
+                try:
+                    # Add timeout for streaming calls to prevent hanging
+                    import signal
+                    
+                    def timeout_handler(signum, frame):
+                        raise TimeoutError("Streaming call timed out")
+                    
+                    # Set a 300 second (5 minute) timeout for streaming
+                    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(300)
+                    
                     try:
-                        sp = StreamProcessor(self.ui, params["stop"])
-                        # Add timeout for streaming calls to prevent hanging
-                        import signal
+                        rsp = completion(**params)
                         
-                        def timeout_handler(signum, frame):
-                            raise TimeoutError("Streaming call timed out")
-                        
-                        # Set a 300 second (5 minute) timeout for streaming
-                        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-                        signal.alarm(300)
-                        
-                        try:
-                            rsp = completion(stream=True, **params)
-                            content = sp.process(rsp)
-                        finally:
-                            signal.alarm(0)  # Cancel the alarm
-                            signal.signal(signal.SIGALRM, old_handler)  # Restore old handler
+                        # Use appropriate stream processor based on whether tools are available
+                        if has_tools:
+                            # Use tool call stream processor for better tool call handling
+                            tcsp = ToolCallStreamProcessor(self.ui, params["stop"])
+                            stream_response = tcsp.process(rsp)
                             
-                    except TimeoutError as e:
-                        self.ui.error("Streaming call timed out after 5 minutes")
-                        raise self.LLMCallException(f"Streaming timeout: {e}", partial_result=sp.last_chunk if 'sp' in locals() else "") from e
-                    except Exception as e:
-                        # On streaming error, propagate buffer so far
-                        self.ui.error(f"Streaming error: {e}")
-                        raise self.LLMCallException(f"Streaming error: {e}", partial_result=sp.last_chunk if 'sp' in locals() else "") from e
-                    tool_calls = []
-                else:
-                    try:
-                        # Add timeout for non-streaming calls as well
-                        import signal
-                        
-                        def timeout_handler(signum, frame):
-                            raise TimeoutError("Completion call timed out")
-                        
-                        # Set a 300 second (5 minute) timeout
-                        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-                        signal.alarm(300)
-                        
-                        try:
-                            rsp = completion(**params)
-                        finally:
-                            signal.alarm(0)  # Cancel the alarm
-                            signal.signal(signal.SIGALRM, old_handler)  # Restore old handler
-                            
-                        if hasattr(rsp, "choices"):  # Regular response
-                            msg = rsp["choices"][0]["message"]
-                            content = msg.get("content", "")
-                            tool_calls = msg.get("tool_calls", [])
-                        else:  # Streaming response
+                            # Extract content and tool calls from the reconstructed message
+                            if hasattr(stream_response, 'choices') and stream_response.choices:
+                                msg = stream_response.choices[0].message
+                                content = msg.content or ""
+                                tool_calls = msg.tool_calls or []
+                            else:
+                                content = ""
+                                tool_calls = []
+                        else:
+                            # Use simple stream processor for content-only responses
                             sp = StreamProcessor(self.ui, params["stop"])
                             content = sp.process(rsp)
                             tool_calls = []
-                    except TimeoutError as e:
-                        self.ui.error("Completion call timed out after 5 minutes")
-                        raise self.LLMCallException(f"Completion timeout: {e}", partial_result="\n\n".join(convo)) from e
-                    except Exception as e:
-                        # On error, propagate convo so far
-                        self.ui.error(f"Completion error: {e}")
-                        raise self.LLMCallException(f"Completion error: {e}", partial_result="\n\n".join(convo)) from e
+                            
+                    finally:
+                        signal.alarm(0)  # Cancel the alarm
+                        signal.signal(signal.SIGALRM, old_handler)  # Restore old handler
+                        
+                except TimeoutError as e:
+                    self.ui.error("Streaming call timed out after 5 minutes")
+                    error_partial = ""
+                    if 'tcsp' in locals():
+                        error_partial = tcsp.last_chunk
+                    elif 'sp' in locals():
+                        error_partial = sp.last_chunk
+                    raise self.LLMCallException(f"Streaming timeout: {e}", partial_result=error_partial) from e
+                except Exception as e:
+                    # On streaming error, propagate buffer so far
+                    self.ui.error(f"Streaming error: {e}")
+                    error_partial = ""
+                    if 'tcsp' in locals():
+                        error_partial = tcsp.last_chunk
+                    elif 'sp' in locals():
+                        error_partial = sp.last_chunk
+                    raise self.LLMCallException(f"Streaming error: {e}", partial_result=error_partial) from e
 
-                # DEBUG: Show stream value at print point
-                # self.ui.show("status", f"[DEBUG] stream={stream}")
-                # Only print the assistant block if neither the stream argument nor params['stream'] is True
-                if not (stream or params.get("stream")):
-                    self.ui.show("assistant", content or "[tool call]")
+                # Don't print assistant content since it's already streamed
                 convo.append(content or "")
                 hist.append({"role": "assistant",
                              "content": content,

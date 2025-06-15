@@ -184,15 +184,10 @@ def process_llm(ast: AST, current_node: Node) -> Optional[Node]:
     provider_cfg = Config.TOML_SETTINGS.get('settings', {}).get(llm_provider, {})
     Config.API_KEY = provider_cfg.get('apiKey')
     llm_client = LLMClient(model=llm_model)
-    actual_model = model if model else getattr(llm_client.client, 'settings', {}).get('model', llm_model)
-
-    # Add system prompt to params for LLM clients that use it
+    actual_model = model if model else getattr(llm_client.client, 'settings', {}).get('model', llm_model)    # Add system prompt to params for LLM clients that use it
     params['system_prompt'] = system_prompt
 
-    # Always enable streaming
-    params['stream'] = True
-
-    # Print a simple header for the LLM call
+    # Print a simple header for the LLM call (streaming is now always enabled)
     console.print(f"[cyan]@llm ({llm_provider}/{actual_model}) streaming...[/cyan]")
 
     start_time = time.time()
