@@ -461,7 +461,24 @@ class ToolRegistry(dict):
                     [path, *map(str, kw.values())],
                     capture_output=True, text=True, check=True, env=env
                 ).stdout
-            runner = runner_with_env
+            
+            def runner_with_error_handling(**kw):
+                try:
+                    return runner_with_env(**kw)
+                except subprocess.CalledProcessError as e:
+                    error_message = f"Tool failed with exit code {e.returncode}.\nStderr: {e.stderr}"
+                    logging.error(error_message)
+                    return {"error": error_message, "stderr": e.stderr}
+                except FileNotFoundError:
+                    error_message = f"Tool executable not found at {path}."
+                    logging.error(error_message)
+                    return {"error": error_message}
+                except Exception as e:
+                    error_message = f"Unexpected tool execution error: {str(e)}"
+                    logging.error(error_message)
+                    return {"error": error_message}
+            
+            runner = runner_with_error_handling
 
         self[name] = runner
         self._manifests.append(meta)

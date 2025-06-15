@@ -102,22 +102,28 @@ class StreamProcessor:
 
     def process(self, stream_iter):
         buf = ""
-        for chunk in stream_iter:
-            delta = chunk["choices"][0]["delta"]
-            txt = delta.get("content", "")
-            if txt:  # Only process non-empty text
-                buf += txt
-                for s in self.stop:
-                    if buf.endswith(s):
-                        buf = buf[:-len(s)]
-                        txt = txt[:-len(s)]
-                if txt:  # Only show non-empty text
-                    # Only show new content since last chunk
-                    if txt != self.last_chunk:
-                        self.ui.show("", txt, end="")
-                        self.last_chunk = txt
-        # Add final newline after streaming is complete
-        self.ui.show("", "")
+        try:
+            for chunk in stream_iter:
+                delta = chunk["choices"][0]["delta"]
+                txt = delta.get("content", "")
+                if txt:  # Only process non-empty text
+                    buf += txt
+                    for s in self.stop:
+                        if buf.endswith(s):
+                            buf = buf[:-len(s)]
+                            txt = txt[:-len(s)]
+                    if txt:  # Only show non-empty text
+                        # Only show new content since last chunk
+                        if txt != self.last_chunk:
+                            self.ui.show("", txt, end="")
+                            self.last_chunk = txt
+            # Add final newline after streaming is complete
+            self.ui.show("", "")
+        except Exception as e:
+            # Ensure last_chunk is set for error reporting
+            self.last_chunk = buf
+            self.ui.error(f"Streaming error: {e}")
+            raise
         return buf or ""  # Ensure we always return a string, even if empty
 
 # ====================================================================
@@ -193,7 +199,7 @@ class liteclient:
     top_p: float = 1.0
     max_tokens: Optional[int] = None
     system_prompt: str = "You are a helpful assistant."
-    max_tool_turns: int = 30
+    max_tool_turns: int = 300  # Increased from 30 to 300 for long-running workflows
     settings: Optional[Dict[str, Any]] = field(default=None, repr=False)
     tools_dir: str | Path = "tools"  # NEW
     mcp_servers: List[str] = field(default_factory=list)  # NEW
@@ -399,20 +405,56 @@ class liteclient:
 
         # ----- conversation loop -----
         convo = []
+        # Use operation-specific tools-turns-max if provided, otherwise use instance default
+        max_turns = op.get("tools-turns-max", self.max_tool_turns)
         try:
-            for _ in range(self.max_tool_turns):
+            for turn_count in range(max_turns):
                 if stream:
                     try:
                         sp = StreamProcessor(self.ui, params["stop"])
-                        rsp = completion(stream=True, **params)
-                        content = sp.process(rsp)
+                        # Add timeout for streaming calls to prevent hanging
+                        import signal
+                        
+                        def timeout_handler(signum, frame):
+                            raise TimeoutError("Streaming call timed out")
+                        
+                        # Set a 300 second (5 minute) timeout for streaming
+                        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                        signal.alarm(300)
+                        
+                        try:
+                            rsp = completion(stream=True, **params)
+                            content = sp.process(rsp)
+                        finally:
+                            signal.alarm(0)  # Cancel the alarm
+                            signal.signal(signal.SIGALRM, old_handler)  # Restore old handler
+                            
+                    except TimeoutError as e:
+                        self.ui.error("Streaming call timed out after 5 minutes")
+                        raise self.LLMCallException(f"Streaming timeout: {e}", partial_result=sp.last_chunk if 'sp' in locals() else "") from e
                     except Exception as e:
                         # On streaming error, propagate buffer so far
-                        raise self.LLMCallException(f"Streaming error: {e}", partial_result=sp.last_chunk) from e
+                        self.ui.error(f"Streaming error: {e}")
+                        raise self.LLMCallException(f"Streaming error: {e}", partial_result=sp.last_chunk if 'sp' in locals() else "") from e
                     tool_calls = []
                 else:
                     try:
-                        rsp = completion(**params)
+                        # Add timeout for non-streaming calls as well
+                        import signal
+                        
+                        def timeout_handler(signum, frame):
+                            raise TimeoutError("Completion call timed out")
+                        
+                        # Set a 300 second (5 minute) timeout
+                        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                        signal.alarm(300)
+                        
+                        try:
+                            rsp = completion(**params)
+                        finally:
+                            signal.alarm(0)  # Cancel the alarm
+                            signal.signal(signal.SIGALRM, old_handler)  # Restore old handler
+                            
                         if hasattr(rsp, "choices"):  # Regular response
                             msg = rsp["choices"][0]["message"]
                             content = msg.get("content", "")
@@ -421,8 +463,12 @@ class liteclient:
                             sp = StreamProcessor(self.ui, params["stop"])
                             content = sp.process(rsp)
                             tool_calls = []
+                    except TimeoutError as e:
+                        self.ui.error("Completion call timed out after 5 minutes")
+                        raise self.LLMCallException(f"Completion timeout: {e}", partial_result="\n\n".join(convo)) from e
                     except Exception as e:
                         # On error, propagate convo so far
+                        self.ui.error(f"Completion error: {e}")
                         raise self.LLMCallException(f"Completion error: {e}", partial_result="\n\n".join(convo)) from e
 
                 # DEBUG: Show stream value at print point
@@ -436,6 +482,7 @@ class liteclient:
                              "tool_calls": tool_calls or None})
 
                 if not tool_calls:
+                    # LLM finished conversation naturally
                     break
 
                 # ---- execute tool calls ----
@@ -489,6 +536,7 @@ class liteclient:
                     except json.JSONDecodeError:
                         error_msg = f"Invalid JSON arguments for tool {tc['function']['name']}: {args}"
                         self.ui.error(error_msg)
+                        self.ui.show("status", f"[red]Tool conversation terminated due to JSON parsing error[/red]")
                         convo.append(error_msg)
                         hist.append({"role": "tool",
                                      "tool_call_id": tc["id"],
@@ -497,6 +545,11 @@ class liteclient:
                         # Break the tool call loop and return current conversation
                         return {"text": "\n\n".join(convo), "messages": hist}
                 params["messages"] = hist
+            
+            # Check if we exited due to max turns limit
+            if turn_count == max_turns - 1:
+                self.ui.show("status", f"[yellow]Tool conversation reached maximum limit of {max_turns} turns[/yellow]")
+                
         except self.LLMCallException as e:
             # Propagate with partial result
             raise
