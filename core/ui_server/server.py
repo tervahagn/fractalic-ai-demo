@@ -12,6 +12,11 @@ import os
 import toml
 from fastapi.responses import FileResponse, Response
 import logging
+import subprocess
+import signal
+import aiohttp
+import time
+from typing import Optional, Dict, Any
 
 # --- Robust import for ToolRegistry regardless of working directory ---
 import sys
@@ -28,6 +33,11 @@ logging.getLogger("git.cmd").setLevel(logging.CRITICAL)
 app = FastAPI()
 
 current_repo_path = ""
+
+# MCP Manager process management
+mcp_manager_process: Optional[subprocess.Popen] = None
+mcp_manager_port = 5859
+mcp_manager_url = f"http://localhost:{mcp_manager_port}"
 
 # Set BASE_DIR to the root directory to allow navigation to parent directories
 BASE_DIR = Path('/').resolve()
@@ -51,6 +61,151 @@ def set_repo_path(path: str):
     """Set the current repository path globally"""
     global current_repo_path
     current_repo_path = path
+
+# MCP Manager process management functions
+async def start_mcp_manager():
+    """Start the MCP manager process"""
+    global mcp_manager_process
+    
+    if mcp_manager_process and mcp_manager_process.poll() is None:
+        return {"status": "already_running", "pid": mcp_manager_process.pid}
+    
+    try:
+        # Path to the MCP manager script
+        mcp_manager_script = Path(project_root) / "fractalic_mcp_manager.py"
+        
+        if not mcp_manager_script.exists():
+            raise HTTPException(status_code=500, detail=f"MCP manager script not found at {mcp_manager_script}")
+          # Start the MCP manager process
+        mcp_manager_process = subprocess.Popen(
+            [sys.executable, str(mcp_manager_script), "--port", str(mcp_manager_port), "serve"],
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Give it a moment to start
+        await asyncio.sleep(2)
+        
+        # Check if process is still running
+        if mcp_manager_process.poll() is not None:
+            # Process died, read error output
+            stdout, stderr = mcp_manager_process.communicate()
+            error_msg = f"MCP manager failed to start. stdout: {stdout}, stderr: {stderr}"
+            mcp_manager_process = None
+            raise HTTPException(status_code=500, detail=error_msg)
+        
+        return {"status": "started", "pid": mcp_manager_process.pid, "port": mcp_manager_port}
+        
+    except Exception as e:
+        mcp_manager_process = None
+        raise HTTPException(status_code=500, detail=f"Failed to start MCP manager: {str(e)}")
+
+async def stop_mcp_manager():
+    """Stop the MCP manager process"""
+    global mcp_manager_process
+    
+    if not mcp_manager_process or mcp_manager_process.poll() is not None:
+        return {"status": "not_running"}
+    
+    try:
+        # First, try to gracefully shutdown via API
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{mcp_manager_url}/kill") as response:
+                    if response.status == 200:
+                        # Wait for process to terminate
+                        for _ in range(10):  # Wait up to 10 seconds
+                            if mcp_manager_process.poll() is not None:
+                                break
+                            await asyncio.sleep(1)
+        except:
+            pass  # Graceful shutdown failed, continue with forceful termination
+        
+        # If still running, force terminate
+        if mcp_manager_process.poll() is None:
+            mcp_manager_process.terminate()
+            
+            # Wait for termination
+            for _ in range(5):  # Wait up to 5 seconds
+                if mcp_manager_process.poll() is not None:
+                    break
+                await asyncio.sleep(1)
+            
+            # If still running, kill forcefully
+            if mcp_manager_process.poll() is None:
+                mcp_manager_process.kill()
+                mcp_manager_process.wait()
+        
+        pid = mcp_manager_process.pid
+        mcp_manager_process = None
+        return {"status": "stopped", "pid": pid}
+        
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+async def get_mcp_manager_status():
+    """Get the status of the MCP manager process"""
+    global mcp_manager_process
+    
+    if not mcp_manager_process:
+        return {"status": "not_started", "running": False, "api_responsive": False}
+    
+    poll_result = mcp_manager_process.poll()
+    if poll_result is not None:
+        # Process has terminated
+        pid = mcp_manager_process.pid if mcp_manager_process else None
+        mcp_manager_process = None
+        return {
+            "status": "terminated", 
+            "running": False, 
+            "api_responsive": False,
+            "exit_code": poll_result,
+            "last_pid": pid
+        }
+    
+    # Process is running, try to connect to API
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{mcp_manager_url}/status", timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return {
+                        "status": "running",
+                        "running": True,
+                        "pid": mcp_manager_process.pid,
+                        "port": mcp_manager_port,
+                        "api_responsive": True,
+                        "servers": data
+                    }
+                else:
+                    return {
+                        "status": "running_not_responsive",
+                        "running": True,
+                        "pid": mcp_manager_process.pid,
+                        "port": mcp_manager_port,
+                        "api_responsive": False,
+                        "http_status": response.status
+                    }
+    except Exception as e:
+        return {
+            "status": "running_not_responsive",
+            "running": True,
+            "pid": mcp_manager_process.pid,
+            "port": mcp_manager_port,
+            "api_responsive": False,
+            "connection_error": str(e)
+        }
+
+# Cleanup function for graceful shutdown
+async def cleanup_mcp_manager():
+    """Cleanup MCP manager process on shutdown"""
+    if mcp_manager_process and mcp_manager_process.poll() is None:
+        try:
+            await stop_mcp_manager()
+        except:
+            pass
 
 # Helper functions
 def get_repo(repo_path: str):
@@ -631,3 +786,61 @@ async def rename_item(old_path: str = Query(...), new_name: str = Query(...)):
     except Exception as e:
         print(f"Error renaming item: {str(e)}")
         return JSONResponse(status_code=500, content={"detail": f"Internal Server Error: {str(e)}"})
+
+# ============================================================================
+# MCP Manager Control Routes
+# ============================================================================
+
+@app.post("/mcp/start")
+async def start_mcp_manager_route():
+    """Start the MCP manager process"""
+    return await start_mcp_manager()
+
+@app.post("/mcp/stop")
+async def stop_mcp_manager_route():
+    """Stop the MCP manager process"""
+    return await stop_mcp_manager()
+
+@app.get("/mcp/status")
+async def get_mcp_manager_status_route():
+    """Get the status of the MCP manager and its servers"""
+    return await get_mcp_manager_status()
+
+# ============================================================================
+# Application Lifecycle Management
+# ============================================================================
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on application shutdown"""
+    await cleanup_mcp_manager()
+
+# ============================================================================
+# Health Check and Info Routes
+# ============================================================================
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    mcp_status = await get_mcp_manager_status()
+    return {
+        "status": "healthy",
+        "ui_server": "running",
+        "mcp_manager": mcp_status
+    }
+
+@app.get("/info")
+async def get_info():
+    """Get information about the application"""
+    mcp_status = await get_mcp_manager_status()
+    return {
+        "application": "Fractalic UI Server",
+        "version": "1.0.0",
+        "features": {
+            "git_operations": True,
+            "file_management": True,
+            "mcp_manager_control": True,
+            "mcp_server_proxy": True
+        },
+        "mcp_manager": mcp_status
+    }
