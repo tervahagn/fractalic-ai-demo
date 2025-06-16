@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse, asyncio, contextlib, dataclasses, datetime, json, os, shlex, signal, subprocess, sys, time, gc
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional, TextIO
 
 import aiohttp
 from aiohttp import web
@@ -357,6 +357,67 @@ def tool_to_obj(t):
 def ts() -> str: return time.strftime("%H:%M:%S", time.localtime())
 def log(msg: str): print(f"[{ts()}] {msg}", file=sys.stderr)
 
+# ==================================================================== StderrCapture
+class StderrCapture:
+    """A TextIO wrapper that captures stderr output and stores it in a buffer."""
+    
+    def __init__(self, server_name: str, stderr_buffer: list, original_stderr: TextIO):
+        self.server_name = server_name
+        self.stderr_buffer = stderr_buffer
+        self.original_stderr = original_stderr
+        self._buffer_limit = 1000
+    
+    def write(self, text: str) -> int:
+        """Write text to both the original stderr and capture buffer."""
+        # Write to original stderr first
+        count = self.original_stderr.write(text)
+        
+        # Split text into lines and add to buffer with timestamps
+        if text:
+            lines = text.splitlines(keepends=True)
+            for line in lines:
+                if line.strip():  # Only capture non-empty lines
+                    entry = {
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "line": f"[{self.server_name}] {line.rstrip()}"
+                    }
+                    self.stderr_buffer.append(entry)
+                    
+                    # Limit buffer size
+                    if len(self.stderr_buffer) > self._buffer_limit:
+                        del self.stderr_buffer[0:len(self.stderr_buffer) - self._buffer_limit]
+        
+        return count
+    
+    def flush(self):
+        """Flush the original stderr."""
+        return self.original_stderr.flush()
+    
+    def close(self):
+        """Close the original stderr."""
+        return self.original_stderr.close()
+    
+    def fileno(self):
+        """Return the file descriptor of the original stderr."""
+        return self.original_stderr.fileno()
+    
+    def readable(self) -> bool:
+        return False
+    
+    def writable(self) -> bool:
+        return True
+    
+    def seekable(self) -> bool:
+        return False
+    
+    def isatty(self) -> bool:
+        """Check if the original stderr is a TTY."""
+        return self.original_stderr.isatty()
+    
+    def __getattr__(self, name):
+        """Delegate any other attribute access to the original stderr."""
+        return getattr(self.original_stderr, name)
+
 # ==================================================================== Child
 class Child:
     def __init__(self, name: str, spec: dict):
@@ -431,6 +492,201 @@ class Child:
         self.stderr_buffer.clear()
         
         log(f"{self.name}: Cleanup complete")
+
+    async def _setup_stdio_monitoring(self, transport):
+        """Setup monitoring for stdio subprocess stderr output."""
+        try:
+            # The transport is a tuple (read_stream, write_stream)
+            read_stream, write_stream = transport
+            
+            # Try to access the underlying process through various methods
+            process = None
+            
+            # Method 1: Try to access via stream internals
+            for stream in [read_stream, write_stream]:
+                if hasattr(stream, '_transport'):
+                    transport_obj = stream._transport
+                    if hasattr(transport_obj, 'get_extra_info'):
+                        try:
+                            subprocess_obj = transport_obj.get_extra_info('subprocess')
+                            if subprocess_obj:
+                                process = subprocess_obj
+                                break
+                        except:
+                            pass
+                    
+                    # Try other common process attributes
+                    for attr in ['_process', '_protocol']:
+                        if hasattr(transport_obj, attr):
+                            obj = getattr(transport_obj, attr)
+                            if hasattr(obj, 'pid'):  # Looks like a process
+                                process = obj
+                                break
+                            elif hasattr(obj, '_process'):
+                                process = obj._process
+                                break
+                    
+                    if process:
+                        break
+            
+            if process and hasattr(process, 'pid'):
+                self.proc = process
+                self.pid = process.pid
+                log(f"{self.name}: Found subprocess PID {self.pid}")
+                
+                # If the process has stderr available, monitor it
+                if hasattr(process, 'stderr') and process.stderr:
+                    log(f"{self.name}: Starting stderr monitoring")
+                    self._stderr_task = asyncio.create_task(self._monitor_stderr(process.stderr))
+                else:
+                    log(f"{self.name}: No stderr available for monitoring")
+            else:
+                log(f"{self.name}: Could not access subprocess for stderr monitoring")
+                
+        except Exception as e:
+            log(f"{self.name}: Failed to setup stdio monitoring: {e}")
+
+    async def _create_stderr_wrapper(self, command: str, args: list) -> str:
+        """Create a wrapper script that captures stderr for a stdio server."""
+        try:
+            # Create wrapper script path
+            wrapper_path = f"/tmp/mcp_{self.name}_wrapper.sh"
+            log_file_path = f"/tmp/mcp_{self.name}_stderr.log"
+            
+            # Build the command with proper escaping
+            escaped_args = [shlex.quote(arg) for arg in args]
+            full_command = f"{shlex.quote(command)} {' '.join(escaped_args)}"
+            
+            # Create wrapper script content
+            wrapper_content = f"""#!/bin/bash
+
+# Auto-generated stderr capture wrapper for MCP server: {self.name}
+SERVER_NAME="{self.name}"
+LOG_FILE="{log_file_path}"
+
+# Clean up old log file
+rm -f "$LOG_FILE"
+
+# Write initial marker
+echo "[$SERVER_NAME] Starting MCP server..." >> "$LOG_FILE"
+
+# Execute the actual server with stderr redirected to both console and log file
+exec {full_command} 2> >(tee -a "$LOG_FILE" >&2)
+"""
+
+            # Write wrapper script
+            with open(wrapper_path, 'w') as f:
+                f.write(wrapper_content)
+                
+            # Make executable
+            os.chmod(wrapper_path, 0o755)
+            
+            log(f"{self.name}: Created stderr wrapper: {wrapper_path}")
+            return wrapper_path
+            
+        except Exception as e:
+            log(f"{self.name}: Failed to create stderr wrapper: {e}")
+            # Fall back to original command
+            return command
+
+    async def _monitor_stderr(self, stderr_stream):
+        """Monitor stderr stream and capture output."""
+        try:
+            buffer = b""
+            while True:
+                try:
+                    # Read from stderr stream
+                    chunk = await stderr_stream.read(1024)
+                    if not chunk:
+                        break  # EOF - process ended
+                    
+                    buffer += chunk
+                    
+                    # Process complete lines
+                    while b'\n' in buffer:
+                        line, buffer = buffer.split(b'\n', 1)
+                        decoded = line.decode('utf-8', errors='replace').rstrip()
+                        
+                        if decoded:
+                            # Create prefixed line for both console and buffer
+                            prefixed_line = f"[{self.name}:stderr] {decoded}"
+                            print(prefixed_line, flush=True)
+                            
+                            # Add to stderr buffer for UI
+                            entry = {
+                                "timestamp": datetime.datetime.now().isoformat(),
+                                "line": prefixed_line
+                            }
+                            self.stderr_buffer.append(entry)
+                            if len(self.stderr_buffer) > self._output_buffer_limit:
+                                del self.stderr_buffer[0:len(self.stderr_buffer) - self._output_buffer_limit]
+                            self.last_output_renewal = entry["timestamp"]
+                            
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    log(f"{self.name}: Error reading stderr: {e}")
+                    break
+                    
+        except Exception as e:
+            log(f"{self.name}: stderr monitoring error: {e}")
+
+    async def _setup_log_monitoring(self):
+        """Setup monitoring for stderr log file created by wrapper script."""
+        try:
+            # Only monitor stdio servers (HTTP servers don't need stderr capture)
+            if self.transport != "stdio":
+                return
+                
+            log_file_path = f"/tmp/mcp_{self.name}_stderr.log"
+            
+            # Only monitor if log file monitoring is not already active
+            if not hasattr(self, '_log_monitor_task') or self._log_monitor_task is None:
+                self._log_monitor_task = asyncio.create_task(self._monitor_log_file(log_file_path))
+                log(f"{self.name}: Started log file monitoring: {log_file_path}")
+        except Exception as e:
+            log(f"{self.name}: Failed to setup log monitoring: {e}")
+
+    async def _monitor_log_file(self, log_file_path):
+        """Monitor a log file for new stderr content."""
+        try:
+            last_position = 0
+            
+            while True:
+                try:
+                    # Check if file exists and read new content
+                    if os.path.exists(log_file_path):
+                        with open(log_file_path, 'r', encoding='utf-8', errors='replace') as f:
+                            f.seek(last_position)
+                            new_content = f.read()
+                            last_position = f.tell()
+                            
+                            if new_content:
+                                # Process new lines
+                                lines = new_content.splitlines()
+                                for line in lines:
+                                    if line.strip():
+                                        # Add to stderr buffer
+                                        entry = {
+                                            "timestamp": datetime.datetime.now().isoformat(),
+                                            "line": line  # Line already has server prefix from wrapper
+                                        }
+                                        self.stderr_buffer.append(entry)
+                                        if len(self.stderr_buffer) > self._output_buffer_limit:
+                                            del self.stderr_buffer[0:len(self.stderr_buffer) - self._output_buffer_limit]
+                                        self.last_output_renewal = entry["timestamp"]
+                    
+                    # Wait before checking again
+                    await asyncio.sleep(1)
+                    
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    log(f"{self.name}: Error monitoring log file: {e}")
+                    await asyncio.sleep(5)  # Wait longer on error
+                    
+        except Exception as e:
+            log(f"{self.name}: log file monitoring error: {e}")
 
     async def _loop(self):
         while True:
@@ -551,6 +807,12 @@ class Child:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._stderr_task
             self._stderr_task = None
+            
+        if hasattr(self, '_log_monitor_task') and self._log_monitor_task:
+            self._log_monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._log_monitor_task
+            self._log_monitor_task = None
         
         # Close session
         await self._close_session()
@@ -585,14 +847,24 @@ class Child:
         self.state          = "stopped"
         self.healthy        = False
         self.session_at     = 0.0  # Invalidate session timestamp
+        
         log(f"{self.name} ↓")
         
         if self._runner:
             self._runner.cancel()
 
     async def _spawn_if_needed(self):
+        # For HTTP transport, no subprocess is needed
         if self.transport == "http":
             return
+        
+        # For STDIO transport, we don't create our own subprocess
+        # The MCP stdio_client will create its own subprocess
+        # We'll capture output differently in the session setup
+        if self.transport == "stdio":
+            return
+            
+        # For other transports, create subprocess with capture
         if self.proc and self.proc.returncode is None:
             return
         try:
@@ -601,6 +873,44 @@ class Child:
             args = self.spec.get("args", [])
             log(f"Spawning {self.name} with command: {command_parts} {args}")
             
+            # --- Enhanced: Capture stdout and stderr with MCP server name prefixes ---
+            import datetime
+            def iso_now():
+                return datetime.datetime.now().isoformat()
+                    
+            async def capture_output(stream, buffer, stream_name):
+                try:
+                    while True:
+                        if not stream or stream.at_eof():
+                            break
+                        
+                        line = await stream.readline()
+                        if not line:
+                            break
+                            
+                        decoded = line.decode('utf-8', errors='replace').rstrip('\n\r')
+                        # Skip empty lines to reduce noise
+                        if not decoded.strip():
+                            continue
+                            
+                        entry = {"timestamp": iso_now(), "line": decoded}
+                        buffer.append(entry)
+                        if len(buffer) > self._output_buffer_limit:
+                            del buffer[0:len(buffer)-self._output_buffer_limit]
+                        self.last_output_renewal = entry["timestamp"]
+                        
+                        # Always prefix with MCP server name
+                        if stream_name == 'stderr':
+                            print(f"[{self.name}:err] {decoded}", flush=True)
+                        else:
+                            print(f"[{self.name}] {decoded}", flush=True)
+                            
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    log(f"{self.name} {stream_name} capture error: {e}")
+            
+            # Create subprocess with explicit PIPE redirection
             self.proc = await asyncio.create_subprocess_exec(
                 *command_parts,
                 *args,
@@ -608,40 +918,12 @@ class Child:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
             self.pid = self.proc.pid
             self.started_at = time.time()
             
-            # --- New: Capture stdout and stderr output with timestamps ---
-            import datetime
-            def iso_now():
-                return datetime.datetime.now().isoformat()
-                
-            async def capture_output(stream, buffer, stream_name):
-                try:
-                    while True:
-                        if not stream or stream.at_eof():
-                            break
-                        line = await stream.readline()
-                        if not line:
-                            break
-                        decoded = line.decode('utf-8', errors='replace').rstrip('\n')
-                        entry = {"timestamp": iso_now(), "line": decoded}
-                        buffer.append(entry)
-                        # Limit buffer size
-                        if len(buffer) > self._output_buffer_limit:
-                            del buffer[0:len(buffer)-self._output_buffer_limit]
-                        self.last_output_renewal = entry["timestamp"]
-                        # Add prefix with process name, stream, and timestamp
-                        print(f"[{entry['timestamp']}] [{self.name} {stream_name}] {decoded}")
-                        log(f"{self.name} {stream_name}: {decoded}")
-                except asyncio.CancelledError:
-                    log(f"{self.name} {stream_name} capture cancelled")
-                    raise
-                except Exception as e:
-                    log(f"{self.name} {stream_name} capture error: {e}")
-            
-            # Start capture tasks
+            # Start capture tasks immediately after process creation
             self._stdout_task = asyncio.create_task(capture_output(self.proc.stdout, self.stdout_buffer, 'stdout'))
             self._stderr_task = asyncio.create_task(capture_output(self.proc.stderr, self.stderr_buffer, 'stderr'))
             
@@ -714,15 +996,34 @@ class Child:
             else:
                 # STDIO transport: communicate with local process via stdin/stdout
                 # This is for MCP servers that run as separate processes
-                stdio_ctx = stdio_client(StdioServerParameters(
-                    command=self.spec["command"],
-                    args=self.spec.get("args", []),
-                    env=self.spec.get("env", {})
-                ))
+                
+                # Create stderr capture wrapper for stdio servers
+                original_command = self.spec["command"]
+                original_args = self.spec.get("args", [])
+                wrapper_script = await self._create_stderr_wrapper(original_command, original_args)
+                
+                # Use default stderr (don't interfere with subprocess creation)
+                stdio_ctx = stdio_client(
+                    StdioServerParameters(
+                        command=wrapper_script,
+                        args=[],  # All args are embedded in the wrapper script
+                        env=self.spec.get("env", {})
+                    )
+                    # Note: not using errlog parameter to avoid issues with subprocess creation
+                )
+                
+                # Create transport and session
                 transport = await self._exit_stack.enter_async_context(stdio_ctx)
                 self.session = await self._exit_stack.enter_async_context(
                     ClientSession(*transport)
                 )
+                
+                # Try to access the subprocess created by stdio_client to monitor stderr
+                # This approach uses process monitoring to capture stderr
+                await self._setup_stdio_monitoring(transport)
+                
+                # Also setup log file monitoring for stderr (fallback approach)
+                await self._setup_log_monitoring()
             
             # STEP 4: Perform MCP handshake with adaptive timeout handling
             # The handshake establishes the MCP protocol and confirms server capabilities
