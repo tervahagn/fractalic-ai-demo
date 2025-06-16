@@ -570,8 +570,9 @@ rm -f "$LOG_FILE"
 # Write initial marker
 echo "[$SERVER_NAME] Starting MCP server..." >> "$LOG_FILE"
 
-# Execute the actual server with stderr redirected to both console and log file
-exec {full_command} 2> >(tee -a "$LOG_FILE" >&2)
+# Execute the actual server with stderr redirected to log file only
+# We preserve stdin/stdout for MCP protocol and only redirect stderr
+exec {full_command} 2>> "$LOG_FILE"
 """
 
             # Write wrapper script
@@ -1174,30 +1175,34 @@ exec {full_command} 2> >(tee -a "$LOG_FILE" >&2)
                 # Try lightweight health check first
                 health_ok = False
                 
-                # Check if server should be running
-                if self.transport == "http" or (self.proc and self.proc.returncode is None):
+                # For all server types, try session-based health check first
+                if self.session:
                     try:
                         # If session exists, try a simple ping first
-                        if self.session and hasattr(self.session, 'ping'):
+                        if hasattr(self.session, 'ping'):
                             await asyncio.wait_for(self.session.ping(), timeout=10)
                             health_ok = True
-                        elif self.session:
+                        else:
                             # If no ping available, try cached tools with longer timeout
                             await asyncio.wait_for(self.tools(), timeout=15)
                             health_ok = True
-                        else:
-                            # No session, try to establish one
-                            await self._ensure_session()
-                            health_ok = True
                     except Exception as e:
-                        log(f"{self.name}: Health check failed: {e}")
+                        log(f"{self.name}: Session-based health check failed: {e}")
                         health_ok = False
-                elif self.transport == "stdio":
-                    log(f"{self.name}: Process is not running (returncode: {self.proc.returncode if self.proc else 'None'})")
-                    health_ok = False
+                        
+                        # For stdio servers, also check if process is still running
+                        if self.transport == "stdio" and self.proc and self.proc.returncode is not None:
+                            log(f"{self.name}: Process has exited (returncode: {self.proc.returncode})")
+                        elif self.transport == "stdio" and not self.proc:
+                            log(f"{self.name}: No process handle available")
                 else:
-                    # HTTP servers don't have processes, so we rely on session checks above
-                    health_ok = True
+                    # No session, try to establish one
+                    try:
+                        await self._ensure_session()
+                        health_ok = True
+                    except Exception as e:
+                        log(f"{self.name}: Failed to establish session: {e}")
+                        health_ok = False
                 
                 if health_ok:
                     self.healthy = True
