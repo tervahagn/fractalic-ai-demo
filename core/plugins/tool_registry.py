@@ -153,11 +153,16 @@ class ToolRegistry(dict):
             if src.with_suffix(".yaml").exists():
                 continue
             cmd_type = "python-cli" if src.suffix == ".py" else "bash-cli"
-            schema, desc, runner = sniff_cli(src, cmd_type)
+            result = sniff_cli(src, cmd_type)
             
-            # Check if sniff_cli returned simple tool detection (schema will be dict, not list)
-            if isinstance(schema, dict) and schema.get("description") == "Simple JSON tool - accepts JSON input, returns JSON output":
-                # This is a simple JSON tool
+            # If sniff_cli returns None, skip this file (not a valid tool)
+            if result == (None, None, None) or result is None:
+                continue
+                
+            schema, desc, runner = result
+            
+            # If we got a valid result, register the tool
+            if schema and desc and runner:
                 name = src.stem
                 manifest = {
                     "name": name,
@@ -169,72 +174,6 @@ class ToolRegistry(dict):
                     "_simple": True,  # Mark as simple tool
                 }
                 self._register(manifest, runner_override=runner)
-                continue
-            
-            if isinstance(schema, list):
-                # Register each manifest in the list (multi-tool)
-                for manifest in schema:
-                    # Ensure the manifest has the required fields
-                    if not isinstance(manifest, dict) or "name" not in manifest:
-                        print(f"[ToolRegistry] Invalid manifest format in {src}: {manifest}")
-                        continue
-                    manifest["entry"] = str(src)
-                    manifest["command"] = cmd_type
-                    manifest["_auto"] = True
-                    
-                    # Create a specific runner for this tool that includes the tool name as first argument
-                    tool_name = manifest["name"]
-                    exec_prefix = [sys.executable, str(src)] if cmd_type == "python-cli" else [str(src)]
-                    
-                    def make_tool_runner(name, prefix):
-                        def run_tool(**kw):
-                            argv = prefix[:] + [name]  # Add the tool name as the first argument
-                            for k, v in kw.items():
-                                flag = f"--{k.replace('_','-')}"
-                                if isinstance(v, bool):
-                                    if v:
-                                        argv.append(flag)
-                                else:
-                                    argv += [flag, str(v)]
-
-                            # inject settings.toml environment if present
-                            env = None
-                            if Config.TOML_SETTINGS and 'environment' in Config.TOML_SETTINGS:
-                                env = os.environ.copy()
-                                for item in Config.TOML_SETTINGS['environment']:
-                                    if 'key' in item and 'value' in item:
-                                        env[item['key']] = item['value']
-
-                            out = subprocess.run(
-                                argv,
-                                capture_output=True,
-                                text=True,
-                                env=env
-                            )
-                            if out.returncode != 0:
-                                raise RuntimeError(out.stderr.strip() or out.stdout.strip())
-                            try:
-                                return json.loads(out.stdout)
-                            except json.JSONDecodeError:
-                                # For fractalic tools, return raw stdout instead of wrapping in JSON
-                                return out.stdout.strip()
-                        return run_tool
-                    
-                    tool_runner = make_tool_runner(tool_name, exec_prefix)
-                    self._register(manifest, runner_override=tool_runner)
-                # If multi-tool, do NOT register the script stem as a tool
-                continue
-            # Single-tool fallback
-            name = src.stem
-            manifest = {
-                "name": name,
-                "description": desc,
-                "command": cmd_type,
-                "entry": str(src),
-                "parameters": schema,
-                "_auto": True,
-            }
-            self._register(manifest, runner_override=runner)
 
     def _load_mcp(self):
         # print(f"[ToolRegistry] MCP servers to load: {self.mcp_servers}")

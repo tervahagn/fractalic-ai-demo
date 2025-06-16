@@ -1,91 +1,113 @@
-# Fractalic Autodiscoverable Tools - Technical Specification Document (TSD)
+# Fractalic Simple JSON Tools - Technical Specification Document
 
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Schema Format Specification](#schema-format-specification)
-4. [Implementation Requirements](#implementation-requirements)
-5. [Single-Tool vs Multi-Tool Patterns](#single-tool-vs-multi-tool-patterns)
-6. [Parameter Types and Validation](#parameter-types-and-validation)
-7. [Implementation Examples](#implementation-examples)
-8. [Best Practices](#best-practices)
-9. [Testing and Validation](#testing-and-validation)
-10. [Troubleshooting](#troubleshooting)
+2. [Simple JSON Convention](#simple-json-convention)
+3. [Implementation Requirements](#implementation-requirements)
+4. [Schema Format Specification](#schema-format-specification)
+5. [Implementation Examples](#implementation-examples)
+6. [Best Practices](#best-practices)
+7. [Testing and Validation](#testing-and-validation)
+8. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Overview
 
-Fractalic supports **autodiscoverable tools** - executable scripts that can automatically register themselves with the tool registry without requiring manual YAML manifests. This TSD defines the technical requirements, patterns, and best practices for building such tools.
+Fractalic uses **Simple JSON Schema Discovery** for automatic tool registration. This is the ONLY supported approach for autodiscoverable tools.
 
 ### Key Benefits
 - **Zero-configuration deployment**: Drop a script in `tools/`, restart Fractalic
+- **Fast discovery**: Tools must respond within 200ms
 - **Self-documenting**: Tools expose their own schema and parameter definitions
-- **Language agnostic**: Python, Bash, or any executable with proper CLI interface
-- **Multi-tool support**: Single script can expose multiple tool functions
+- **Error-resistant**: Only valid tools are registered, problematic files are skipped
+- **JSON-native**: Clean integration with LLM function calling
 
-### Discovery Flow
+### Discovery Process
 ```mermaid
 graph TD
     A[Script in tools/] --> B{Has .yaml?}
     B -->|Yes| C[Use YAML manifest]
-    B -->|No| D[Auto-discovery]
-    D --> E[Try Simple JSON Test]
-    E --> F{JSON response?}
-    F -->|Yes| G[Simple JSON Convention]
-    F -->|No| H[Try --fractalic-dump-schema]
-    H --> I{Schema dump success?}
-    I -->|Yes| J[Parse JSON schema]
-    I -->|No| K[Fallback to --help parsing]
-    G --> L[Register tool(s)]
-    J --> L
-    K --> L
+    B -->|No| D[Test: {"__test__": true}]
+    D --> E{JSON response < 200ms?}
+    E -->|Yes| F[Register as Simple JSON tool]
+    E -->|No| G[Skip - not a valid tool]
+    F --> H[Tool available to LLM]
 ```
-
-### Discovery Priority Order
-1. **🥇 Simple JSON Convention** - Test with `'{"__test__": true}'`
-2. 🥈 Multi-schema dump - `--fractalic-dump-multi-schema`
-3. 🥉 Single schema dump - `--fractalic-dump-schema`
-4. 🏅 Help text parsing - `--help`
-5. 🎖️ ArgumentParser introspection (fallback)
 
 ---
 
-## Architecture
+## Simple JSON Convention
 
-### Tool Registry Integration
-The `ToolRegistry` class manages autodiscovery through the `_autodiscover_cli()` method with priority-based discovery:
+### Core Principle
+Tools accept JSON input as a single command-line argument and return JSON output to stdout. This provides a clean, language-agnostic interface that works well with LLM function calling.
 
-1. **File Discovery**: Scans `tools/` directory for `.py` and `.sh` files without companion `.yaml`
-2. **Simple JSON Test**: First tests with `'{"__test__": true}'` (highest priority)
-3. **Schema Introspection**: Falls back to `cli_introspect.sniff()` for legacy approaches
-4. **Registration**: Creates tool manifests and execution wrappers
-5. **Schema Generation**: Produces OpenAI-compatible function schemas for LLM consumption
+### Discovery Test
+Every tool must respond to the discovery test:
+```bash
+python3 my_tool.py '{"__test__": true}'
+```
 
-### Command Types
-- **`simple-json`**: Simple JSON input/output convention (RECOMMENDED)
-- **`python-cli`**: Python scripts with argparse interface (legacy)
-- **`bash-cli`**: Shell scripts with documented CLI interface (legacy)
+**Expected response** (any valid JSON):
+```json
+{"success": true}
+```
 
 ---
 
 ## Implementation Requirements
 
-### Simple JSON Convention (Recommended)
+### Mandatory Requirements
 
-#### **Mandatory Requirements**
-1. **Test Mode Response**: Must respond to `'{"__test__": true}'` with `{"success": true, "_simple": true}`
+1. **Fast Response**: Must respond to discovery test within 200ms
 2. **JSON Input**: Accept single JSON string argument via `sys.argv[1]`
 3. **JSON Output**: Print JSON response to stdout using `json.dumps()`
 4. **Error Handling**: Return errors as JSON: `{"error": "message"}`
-5. **UTF-8 Support**: Use `ensure_ascii=False` in `json.dumps()`
+5. **Clean Exit**: Exit with code 0 for success, 1 for errors
 
-#### **Optional Enhancements**
+### Optional Enhancements
+
 1. **Schema Dump**: Support `--fractalic-dump-schema` for rich parameter definitions
-2. **Multi-tool**: Support `--fractalic-dump-multi-schema` for multiple functions
+2. **UTF-8 Support**: Use `ensure_ascii=False` in `json.dumps()`
+3. **Input Validation**: Validate JSON input against expected schema
 
-#### **Simple JSON Template**
+---
+
+## Schema Format Specification
+
+### Basic Schema Structure
+```json
+{
+    "description": "Tool description for LLM context",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "param_name": {
+                "type": "string|number|boolean|array|object",
+                "description": "Parameter description",
+                "enum": ["optional", "values"],
+                "default": "optional_default"
+            }
+        },
+        "required": ["required_param_names"],
+        "additionalProperties": false
+    }
+}
+```
+
+### Supported Parameter Types
+- **string**: Text values
+- **number**: Numeric values (integer or float)
+- **boolean**: true/false values
+- **array**: Lists of values
+- **object**: Nested JSON objects
+
+---
+
+## Implementation Examples
+
+### Basic Tool Template
 ```python
 #!/usr/bin/env python3
 """Brief description of the tool functionality."""
@@ -98,40 +120,53 @@ def process_data(data):
     
     if action == "example":
         param = data.get("param", "default")
-        return {"result": f"Processed {param}"}
-    
-    return {"error": f"Unknown action: {action}"}
+        return {"result": f"Processed: {param}"}
+    elif action == "calculate":
+        x = data.get("x", 0)
+        y = data.get("y", 0)
+        return {"result": x + y}
+    else:
+        return {"error": f"Unknown action: {action}"}
 
 def main():
-    # Test mode for autodiscovery (REQUIRED)
+    # Discovery test - must respond quickly
     if len(sys.argv) == 2 and sys.argv[1] == '{"__test__": true}':
-        print(json.dumps({"success": True, "_simple": True}))
+        print(json.dumps({"success": True}))
         return
     
     # Optional: Rich schema for better LLM integration
     if len(sys.argv) == 2 and sys.argv[1] == "--fractalic-dump-schema":
         schema = {
-            "description": "Brief description of the tool functionality",
+            "description": "Example tool demonstrating Simple JSON convention",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["example"],
+                        "enum": ["example", "calculate"],
                         "description": "Action to perform"
                     },
                     "param": {
                         "type": "string",
-                        "description": "Parameter for processing"
+                        "description": "Parameter for example action"
+                    },
+                    "x": {
+                        "type": "number",
+                        "description": "First number for calculate action"
+                    },
+                    "y": {
+                        "type": "number", 
+                        "description": "Second number for calculate action"
                     }
                 },
-                "required": ["action"]
+                "required": ["action"],
+                "additionalProperties": false
             }
         }
         print(json.dumps(schema, ensure_ascii=False))
         return
     
-    # Process JSON input (REQUIRED)
+    # Process JSON input
     try:
         if len(sys.argv) != 2:
             raise ValueError("Expected exactly one JSON argument")
@@ -140,41 +175,80 @@ def main():
         result = process_data(params)
         print(json.dumps(result, ensure_ascii=False))
         
+    except json.JSONDecodeError as e:
+        print(json.dumps({"error": f"Invalid JSON input: {str(e)}"}))
+        sys.exit(1)
     except Exception as e:
-        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        print(json.dumps({"error": str(e)}))
         sys.exit(1)
 
 if __name__ == "__main__":
     main()
 ```
 
-### Legacy Approaches (Backward Compatibility)
+---
 
-## Schema Format Specification
+## Best Practices
 
-### Base Schema Structure
-All autodiscoverable tools must conform to the OpenAI function calling schema format:
+### Performance
+- **Fast startup**: Avoid heavy imports at module level
+- **Quick response**: Respond to discovery test in <200ms
+- **Lazy loading**: Import dependencies only when needed
 
-```json
-{
-  "name": "tool_name",
-  "description": "Brief description of what the tool does",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "param_name": {
-        "type": "string|number|boolean|array|object",
-        "description": "Parameter description",
-        "enum": ["option1", "option2"],  // optional
-        "default": "default_value"       // optional
-      }
-    },
-    "required": ["required_param1", "required_param2"]
-  }
-}
+### Error Handling
+- **JSON errors**: Always return errors as JSON objects
+- **Descriptive messages**: Include helpful error descriptions
+- **Graceful failure**: Handle edge cases and invalid inputs
+
+### Code Organization
+```python
+# Good: Fast startup, lazy imports
+def process_data(data):
+    if data.get("action") == "heavy_operation":
+        import heavy_library  # Import only when needed
+        return heavy_library.process(data)
+
+# Bad: Slow startup
+import heavy_library  # This slows down discovery
 ```
 
-### Multi-Tool Schema Format
+---
+
+## Testing and Validation
+
+### Manual Testing
+```bash
+# Test discovery
+python3 my_tool.py '{"__test__": true}'
+
+# Test functionality
+python3 my_tool.py '{"action": "example", "param": "test"}'
+```
+
+### Integration Testing
+```python
+from core.plugins.tool_registry import ToolRegistry
+
+# Test tool registration
+registry = ToolRegistry(tools_dir="./tools")
+assert "my_tool" in registry
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+#### Tool Not Discovered
+- **Check response time**: Tool must respond to discovery test in <200ms
+- **Verify JSON output**: Must return valid JSON to stdout
+- **Check file permissions**: Ensure script is executable
+
+#### Runtime Errors
+- **JSON format**: Ensure all output is valid JSON
+- **Error handling**: Wrap all operations in try/catch
+- **Exit codes**: Use exit(0) for success, exit(1) for errors
 For scripts exposing multiple tools, return an array of schema objects:
 
 ```json

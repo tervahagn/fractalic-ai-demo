@@ -117,39 +117,40 @@ print(requests.get(url, timeout=5).text)
 
 ---
 
-## 4.  Contract for auto-discoverable scripts
+## 4.  Simple JSON Schema Discovery Contract
 
-> **📋 For complete implementation requirements, examples, and best practices, see the [Autodiscoverable Tools TSD](./autodiscoverable-tools-tsd.md)**
+Fractalic uses **Simple JSON Schema Discovery** for automatic tool registration. This is the ONLY supported approach for autodiscoverable tools.
 
-### 4.1 Simple JSON Convention (Top Priority)
+### 4.1 Simple JSON Convention Requirements
 
-**The Simple JSON Convention is the RECOMMENDED approach for new tools**, automatically detected first during autodiscovery:
+All autodiscoverable tools must implement the Simple JSON convention:
 
-#### **Discovery Priority Order:**
-1. **🥇 Simple JSON Convention** ← **RECOMMENDED**
-2. 🥈 Multi-schema dump (`--fractalic-dump-multi-schema`)
-3. 🥉 Single schema dump (`--fractalic-dump-schema`)
-4. 🏅 Help text parsing (`--help`)
-5. 🎖️ ArgumentParser introspection
-
-#### **Simple JSON Requirements:**
+#### **Mandatory Requirements:**
 | Requirement | Implementation |
 |-------------|----------------|
-| **Test response** | Must respond to `'{"__test__": true}'` with `{"success": true, "_simple": true}` |
+| **Test response** | Must respond to `'{"__test__": true}'` with valid JSON |
 | **JSON I/O** | Accept JSON as single argument, output JSON to stdout |
-| **Schema dump** *(optional)* | Support `--fractalic-dump-schema` for rich parameter definitions |
 | **Error handling** | Return errors as JSON: `{"error": "message"}` |
+| **Fast response** | Must respond within 200ms to avoid timeout |
 
-#### **Simple JSON Template:**
+#### **Optional Enhancements:**
+| Feature | Implementation |
+|---------|----------------|
+| **Schema dump** | Support `--fractalic-dump-schema` for rich parameter definitions |
+| **UTF-8 Support** | Use `ensure_ascii=False` in `json.dumps()` |
+
+### 4.2 Simple JSON Template
+
 ```python
 #!/usr/bin/env python3
 """Tool description goes here."""
 import json, sys
 
 def process_data(data):
+    """Main processing function."""
     action = data.get("action")
     if action == "example":
-        return {"result": "success"}
+        return {"result": "success", "data": data.get("param", "default")}
     return {"error": f"Unknown action: {action}"}
 
 def main():
@@ -165,7 +166,8 @@ def main():
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["example"]}
+                    "action": {"type": "string", "enum": ["example"], "description": "Action to perform"},
+                    "param": {"type": "string", "description": "Optional parameter"}
                 },
                 "required": ["action"]
             }
@@ -175,6 +177,8 @@ def main():
     
     # Process JSON input
     try:
+        if len(sys.argv) != 2:
+            raise ValueError("Expected exactly one JSON argument")
         params = json.loads(sys.argv[1])
         result = process_data(params)
         print(json.dumps(result, ensure_ascii=False))
@@ -182,22 +186,28 @@ def main():
         print(json.dumps({"error": str(e)}, ensure_ascii=False))
         sys.exit(1)
 
-if __name__ == "__main__": main()
+if __name__ == "__main__": 
+    main()
 ```
 
-### 4.2 Legacy Approaches (Backward Compatibility)
+### 4.3 Tool Discovery Process
 
-| Requirement                                                      | Why it matters                                                           | Python CLI (`python-cli`)                                   | Bash CLI (`bash-cli`)                                    |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------- | -------------------------------------------------------- |
-| **1. Must exit 0 on `--help`**                                   | Registry interrogates the script; non-zero exit is assumed "not a tool". | `argparse` does this by default.                             | Add a `show_help` function + `[[ $1 == --help ]]` guard. |
-| **2. First non-blank help line is a short description**          | Shown in UI and prompt context.                                          | Provided by `description=` in `ArgumentParser`.             | Put a plain sentence before "Usage: …".                  |
-| **3. Options must be visible as `--flag ARG` in help**           | Regex / argparse walker extracts them into JSON schema.                  | `argparse` prints exactly that.                              | Document each flag in help block (see example).          |
-| **4. Every `add_argument` must include a `help` string**         | Ensures parameter descriptions show up in the generated schema.          | Use `help="..."` on all flags.                             |                                                          |
-| **5. Implement `--fractalic-dump-schema` support** *(required)*  | Enables direct JSON schema output, bypassing help text parsing.         | Check for flag and output JSON schema via `get_tool_schema()` | Not commonly supported for bash scripts                 |
-| **6. Script should print JSON on stdout** *(recommended)*        | Allows LLM to keep reasoning on structured data.                         | `print(json.dumps(...))`                                     | `echo '{"key":"value"}'`                                 |
+```mermaid
+graph TD
+    A[Script in tools/] --> B{Has .yaml?}
+    B -->|Yes| C[Use YAML manifest]
+    B -->|No| D[Test with JSON]
+    D --> E{Valid JSON response?}
+    E -->|Yes| F[Register as Simple JSON tool]
+    E -->|No| G[Skip - not a valid tool]
+    F --> H[Tool available to LLM]
+```
 
-**Advanced Features** (see TSD for details):
-- **Multi-tool support**: Single script exposing multiple tool functions via `--fractalic-dump-multi-schema`
+**Important Notes:**
+- Tools that don't respond to the JSON test are **automatically skipped**
+- Helper modules and incomplete scripts are filtered out automatically
+- Only tools that implement the Simple JSON convention are registered
+- Response time must be under 200ms to avoid timeout
 - **Parameter validation**: Type constraints, enums, required fields
 - **Error handling**: Structured error responses
 

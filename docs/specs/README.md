@@ -2,9 +2,9 @@
 
 This directory contains documentation for building and using tools in the Fractalic workflow system.
 
-## Recommended Approach: Simple JSON Convention
+## Simple JSON Convention - The ONLY Supported Approach
 
-**Start here for new tool development!** The Simple JSON Convention provides the fastest path from idea to working tool:
+**All tools must implement the Simple JSON Convention for automatic discovery:**
 
 ```python
 #!/usr/bin/env python3
@@ -13,13 +13,18 @@ import json, sys
 
 def process_data(data):
     # Your tool logic here
-    return {"result": "success"}
+    action = data.get("action")
+    if action == "example":
+        return {"result": "success"}
+    return {"error": f"Unknown action: {action}"}
 
 def main():
+    # Discovery test - REQUIRED
     if len(sys.argv) == 2 and sys.argv[1] == '{"__test__": true}':
-        print(json.dumps({"success": True, "_simple": True}))
+        print(json.dumps({"success": True}))
         return
     
+    # Process JSON input - REQUIRED
     try:
         params = json.loads(sys.argv[1])
         result = process_data(params)
@@ -28,42 +33,52 @@ def main():
         print(json.dumps({"error": str(e)}, ensure_ascii=False))
         sys.exit(1)
 
-if __name__ == "__main__": main()
+if __name__ == "__main__": 
+    main()
 ```
 
-**Benefits**: 90% less code, automatic discovery, perfect LLM integration.
+**Key Requirements:**
+- ✅ Respond to `'{"__test__": true}'` within 200ms
+- ✅ Accept JSON as single argument, return JSON to stdout
+- ✅ Handle errors gracefully with JSON error responses
 
 ## Documents
 
 ### [Tool Plug-in & Auto-Discovery Guide](./tools.md)
-**Overview document** covering the Fractalic tool system, including:
-- **Simple JSON Convention** (top priority approach)
-- Tool autodiscovery priority order
-- Legacy approaches for backward compatibility
-- Tool lifecycle and execution
-- MCP server integration
-- FAQ and troubleshooting
+**Overview document** covering the Fractalic Simple JSON tool system:
+- Simple JSON Convention requirements
+- Tool discovery process
+- Implementation templates
+- Error handling and best practices
 
-### [Autodiscoverable Tools Technical Specification Document (TSD)](./autodiscoverable-tools-tsd.md)
+### [Simple JSON Tools Technical Specification Document (TSD)](./autodiscoverable-tools-tsd.md)
 **Comprehensive technical specification** with implementation details:
-- Simple JSON Convention requirements and examples
-- Legacy pattern documentation
+- Complete Simple JSON requirements
 - Schema format specifications  
 - Parameter types and validation
-- Best practices and testing strategies
-- Migration guidance
+- Implementation examples and best practices
+- Testing and troubleshooting
 
 ## Quick Start
 
-1. **Use Simple JSON**: Copy the template above and implement your `process_data()` function
-2. **Drop in tools/**: Save to `tools/my_tool.py` 
-3. **Restart Fractalic**: Tool is automatically discovered and available to LLMs
-4. **Optional**: Read [tools.md](./tools.md) for advanced features
+1. **Copy the template**: Use the Simple JSON template above
+2. **Implement your logic**: Add your tool functionality in `process_data()`
+3. **Drop in tools/**: Save to `tools/my_tool.py` 
+4. **Restart Fractalic**: Tool is automatically discovered and available to LLMs
 
-## Key Concepts
+## Key Benefits
 
-- **Simple JSON Convention**: Top priority autodiscovery (recommended)
-- **Auto-discovery priority**: Simple JSON → Schema dumps → Help text → ArgumentParser
-- **Schema dumping**: Optional rich parameter definitions via `--fractalic-dump-schema`
-- **OpenAI compatibility**: Tool schemas follow OpenAI function calling format
-- **Language agnostic**: Python, Bash, or any CLI-compatible executable
+- **Fast discovery**: Tools respond in <200ms, no hanging on problematic files
+- **Error-resistant**: Only valid tools are registered, helpers are skipped
+- **Simple protocol**: JSON in, JSON out - clean LLM integration
+- **Zero configuration**: No YAML files needed for basic tools
+- **Language agnostic**: Works with any language that can handle CLI arguments
+
+## Migration from Legacy Approaches
+
+If you have existing tools using argparse or help text parsing, convert them to Simple JSON:
+
+1. **Replace argparse** with JSON parameter parsing
+2. **Add discovery test** that responds to `'{"__test__": true}'`
+3. **Return JSON** instead of plain text output
+4. **Test quickly**: Ensure response time is <200ms
