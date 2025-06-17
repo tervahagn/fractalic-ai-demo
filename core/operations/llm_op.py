@@ -21,7 +21,7 @@ from rich.box import SQUARE
 # You can initialize LLMClient here if it's a singleton
 
 
-def process_llm(ast: AST, current_node: Node) -> Optional[Node]:
+def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_files=None, file_commit_hashes=None, base_dir=None) -> Optional[Node]:
     """Process @llm operation with updated schema support"""
     console = Console(force_terminal=True)
 
@@ -184,6 +184,19 @@ def process_llm(ast: AST, current_node: Node) -> Optional[Node]:
     provider_cfg = Config.TOML_SETTINGS.get('settings', {}).get(llm_provider, {})
     Config.API_KEY = provider_cfg.get('apiKey')
     llm_client = LLMClient(model=llm_model)
+    
+    # Set execution context for tool registry if available
+    if hasattr(llm_client.client, 'registry'):
+        current_file = getattr(current_node, 'created_by_file', None)
+        llm_client.client.registry.set_execution_context(
+            ast=ast,
+            current_file=current_file,
+            call_tree_node=call_tree_node,
+            committed_files=committed_files,
+            file_commit_hashes=file_commit_hashes,
+            base_dir=base_dir
+        )
+    
     actual_model = model if model else getattr(llm_client.client, 'settings', {}).get('model', llm_model)    # Add system prompt to params for LLM clients that use it
     params['system_prompt'] = system_prompt
 

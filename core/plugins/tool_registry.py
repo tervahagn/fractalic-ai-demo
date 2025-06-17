@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Callable, Optional
 import os
 import logging
+import uuid
 
 from .cli_introspect import sniff as sniff_cli
 from .mcp_client import list_tools as mcp_list, call_tool as mcp_call
@@ -103,6 +104,13 @@ class ToolRegistry(dict):
         self._manifests: List[Dict[str, Any]] = []
         self.tools_dir = Path(tools_dir).expanduser()
         self.mcp_servers = mcp_servers or []
+        # Store current execution context for fractalic_run tool
+        self._current_ast = None
+        self._current_file = None
+        self._current_call_tree_node = None
+        self._committed_files = None
+        self._file_commit_hashes = None
+        self._base_dir = None
         self.rescan()
 
     def rescan(self):
@@ -111,6 +119,7 @@ class ToolRegistry(dict):
         self._load_yaml_manifests()
         self._autodiscover_cli()
         self._load_mcp()
+        self._register_builtin_tools()
 
     def generate_schema(self) -> List[Dict[str, Any]]:
         """Generate OpenAI-compatible schema for all registered tools."""
@@ -426,3 +435,259 @@ class ToolRegistry(dict):
         if hasattr(self, '_tool_names') and len(self._tool_names) == len(self._manifests):
             # print(f"[ToolRegistry] Discovered tools: {', '.join(self._tool_names)}")
             del self._tool_names
+    
+    def set_execution_context(self, ast, current_file, call_tree_node, committed_files=None, file_commit_hashes=None, base_dir=None):
+        """Set current execution context for built-in tools like fractalic_run."""
+        self._current_ast = ast
+        self._current_file = current_file
+        self._current_call_tree_node = call_tree_node
+        self._committed_files = committed_files or set()
+        self._file_commit_hashes = file_commit_hashes or {}
+        self._base_dir = base_dir
+    
+    def _register_builtin_tools(self):
+        """Register built-in tools like fractalic_run."""
+        # Register fractalic_run tool
+        fractalic_run_manifest = {
+            "name": "fractalic_run",
+            "description": "Execute a Fractalic script within current context",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string", 
+                        "description": "Path to .md file to execute"
+                    },
+                    "prompt": {
+                        "type": "string", 
+                        "description": "Optional prompt text to prepend to execution"
+                    },
+                    "block_uri": {
+                        "type": "string", 
+                        "description": "Optional block reference to include from current context"
+                    },
+                    "mode": {
+                        "type": "string", 
+                        "enum": ["append", "prepend", "replace"], 
+                        "default": "append",
+                        "description": "How to insert results back into context"
+                    }
+                },
+                "required": ["file_path"]
+            },
+            "_builtin": True
+        }
+        
+        self._register(fractalic_run_manifest, runner_override=self._handle_fractalic_run)
+    
+    def _handle_fractalic_run(self, **kwargs):
+        """Handle fractalic_run tool calls."""
+        try:
+            # Import here to avoid circular imports
+            from core.operations.runner import run
+            from core.ast_md.node import Node, NodeType
+            from core.ast_md.ast import get_ast_part_by_path, AST
+            
+            # Check if we have execution context
+            if not self._current_ast or not self._current_file or not self._current_call_tree_node:
+                return {
+                    "error": "fractalic_run tool requires execution context to be set",
+                    "status": "failed"
+                }
+            
+            # Extract parameters
+            file_path = kwargs.get("file_path")
+            prompt = kwargs.get("prompt")
+            block_uri = kwargs.get("block_uri")
+            mode = kwargs.get("mode", "append")
+            
+            if not file_path:
+                return {
+                    "error": "file_path parameter is required",
+                    "status": "failed"
+                }
+            
+            # Resolve file path relative to current working directory
+            import os
+            if not os.path.isabs(file_path):
+                # Make file path relative to current working directory
+                file_path = os.path.join(os.getcwd(), file_path)
+            
+            if not os.path.exists(file_path):
+                return {
+                    "error": f"File not found: {file_path}",
+                    "status": "failed"
+                }
+            
+            # Build input AST if prompt or block_uri provided
+            input_ast = None
+            if prompt or block_uri:
+                input_ast = AST("")
+                
+                if block_uri:
+                    # Get the referenced block from current AST
+                    try:
+                        block_ast = get_ast_part_by_path(self._current_ast, block_uri, block_uri.endswith("/*"))
+                        input_ast = block_ast
+                    except Exception as e:
+                        return {
+                            "error": f"Block reference '{block_uri}' not found: {str(e)}",
+                            "status": "failed"
+                        }
+                
+                if prompt:
+                    # Create a prompt node
+                    prompt_node = Node(
+                        type=NodeType.HEADING,
+                        name="Input Parameters",
+                        level=1,
+                        content=f"# Input Parameters\n{prompt}",
+                        id="InputParameters",
+                        key=str(uuid.uuid4())[:8]
+                    )
+                    
+                    if input_ast and input_ast.parser.nodes:
+                        # Append prompt to existing blocks
+                        from core.ast_md.ast import perform_ast_operation
+                        from core.ast_md.node import OperationType
+                        prompt_ast = AST("")
+                        prompt_ast.parser.nodes = {prompt_node.key: prompt_node}
+                        prompt_ast.parser.head = prompt_node
+                        prompt_ast.parser.tail = prompt_node
+                        
+                        perform_ast_operation(
+                            src_ast=prompt_ast,
+                            src_path='',
+                            src_hierarchy=False,
+                            dest_ast=input_ast,
+                            dest_path=input_ast.parser.tail.key,
+                            dest_hierarchy=False,
+                            operation=OperationType.APPEND
+                        )
+                    else:
+                        # Use prompt as input
+                        input_ast = AST("")
+                        input_ast.parser.nodes = {prompt_node.key: prompt_node}
+                        input_ast.parser.head = prompt_node
+                        input_ast.parser.tail = prompt_node
+            
+            # Call run function directly to avoid AST insertion issues
+            run_result, child_call_tree_node, ctx_file, ctx_hash, trc_file, trc_hash, branch_name, explicit_return = run(
+                filename=file_path,
+                param_node=input_ast,
+                create_new_branch=False,  # Don't create new branch for tool execution
+                p_parent_filename=self._current_file,
+                p_parent_operation="fractalic_run",
+                p_call_tree_node=self._current_call_tree_node,
+                committed_files=self._committed_files,
+                file_commit_hashes=self._file_commit_hashes,
+                base_dir=self._base_dir
+            )
+            
+            # Format response for tool calling interface
+            response = {
+                "status": "success",
+                "explicit_return": explicit_return,
+                "trace_info": {
+                    "ctx_file": ctx_file,
+                    "ctx_hash": ctx_hash,
+                    "trc_file": trc_file,
+                    "trc_hash": trc_hash,
+                    "branch_name": branch_name
+                }
+            }
+            
+            # If there's an explicit return, try to extract the content
+            if explicit_return and run_result:
+                # Find the return content by looking for nodes with return results
+                return_content = ""
+                for node in run_result.parser.nodes.values():
+                    if hasattr(node, 'content') and node.content and '@return' not in node.content:
+                        return_content += node.content + "\n"
+                
+                response["return_content"] = return_content.strip()
+            else:
+                response["message"] = "Script executed successfully"
+            
+            return response
+            
+        except Exception as e:
+            import traceback
+            return {
+                "error": str(e),
+                "status": "failed",
+                "traceback": traceback.format_exc()
+            }
+    
+    def _build_run_params(self, file_path, prompt=None, block_uri=None, mode="append"):
+        """Build parameters dictionary in format expected by process_run."""
+        # Parse file path to get directory and filename
+        path_obj = Path(file_path)
+        if path_obj.is_absolute():
+            # For absolute paths, get directory and filename
+            file_dir = str(path_obj.parent)
+            filename = path_obj.name
+        else:
+            # For relative paths, assume current directory
+            file_dir = "."
+            filename = file_path
+        
+        params = {
+            "file": {
+                "path": file_dir,
+                "file": filename
+            },
+            "mode": mode
+        }
+        
+        # Add prompt if provided
+        if prompt:
+            params["prompt"] = prompt
+        
+        # Add block reference if provided  
+        if block_uri:
+            params["block"] = {
+                "block_uri": block_uri,
+                "nested_flag": block_uri.endswith("/*") if block_uri else False
+            }
+        
+        return params
+    
+    def _format_tool_response(self, result):
+        """Format process_run result for tool calling interface."""
+        if result is None:
+            return {
+                "status": "success",
+                "message": "Script executed successfully",
+                "explicit_return": False
+            }
+        
+        # result is a tuple: (next_node, call_tree_node, ctx_file, ctx_hash, trc_file, trc_hash, branch_name, explicit_return)
+        if isinstance(result, tuple) and len(result) >= 8:
+            next_node, call_tree_node, ctx_file, ctx_hash, trc_file, trc_hash, branch_name, explicit_return = result
+            
+            response = {
+                "status": "success",
+                "explicit_return": explicit_return,
+                "trace_info": {
+                    "ctx_file": ctx_file,
+                    "ctx_hash": ctx_hash,
+                    "trc_file": trc_file,
+                    "trc_hash": trc_hash,
+                    "branch_name": branch_name
+                }
+            }
+            
+            # If there's a return result, extract the content
+            if explicit_return and next_node and hasattr(next_node, 'content'):
+                response["return_content"] = next_node.content
+            else:
+                response["message"] = "Script executed successfully"
+            
+            return response
+        else:
+            return {
+                "status": "success", 
+                "message": "Script executed successfully",
+                "explicit_return": False
+            }

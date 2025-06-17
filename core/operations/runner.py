@@ -191,7 +191,14 @@ def run(filename: str, param_node: Optional[Union[Node, AST]] = None, create_new
                         base_dir=base_dir
                     )
                 elif operation_name == "@llm":
-                    current_node = process_llm(ast, current_node)
+                    current_node = process_llm(
+                        ast, 
+                        current_node,
+                        call_tree_node=new_node,
+                        committed_files=committed_files,
+                        file_commit_hashes=file_commit_hashes,
+                        base_dir=base_dir
+                    )
                 elif operation_name == "@goto":
                     current_node = process_goto(ast, current_node, goto_count)
                 elif operation_name == "@shell":
