@@ -111,6 +111,7 @@ class ToolRegistry(dict):
         self._committed_files = None
         self._file_commit_hashes = None
         self._base_dir = None
+        self._tool_loop_ast = None
         self.rescan()
 
     def rescan(self):
@@ -436,7 +437,7 @@ class ToolRegistry(dict):
             # print(f"[ToolRegistry] Discovered tools: {', '.join(self._tool_names)}")
             del self._tool_names
     
-    def set_execution_context(self, ast, current_file, call_tree_node, committed_files=None, file_commit_hashes=None, base_dir=None):
+    def set_execution_context(self, ast, current_file, call_tree_node, committed_files=None, file_commit_hashes=None, base_dir=None, tool_loop_ast=None):
         """Set current execution context for built-in tools like fractalic_run."""
         self._current_ast = ast
         self._current_file = current_file
@@ -444,6 +445,7 @@ class ToolRegistry(dict):
         self._committed_files = committed_files or set()
         self._file_commit_hashes = file_commit_hashes or {}
         self._base_dir = base_dir
+        self._tool_loop_ast = tool_loop_ast
     
     def _register_builtin_tools(self):
         """Register built-in tools like fractalic_run."""
@@ -463,8 +465,11 @@ class ToolRegistry(dict):
                         "description": "Optional prompt text to prepend to execution"
                     },
                     "block_uri": {
-                        "type": "string", 
-                        "description": "Optional block reference to include from current context"
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}}
+                        ], 
+                        "description": "Block reference(s) to include from current context. Supports wildcards like 'section/*'"
                     },
                     "mode": {
                         "type": "string", 
@@ -525,9 +530,15 @@ class ToolRegistry(dict):
                 input_ast = AST("")
                 
                 if block_uri:
-                    # Get the referenced block from current AST
+                    # Handle both string and array block_uri
                     try:
-                        block_ast = get_ast_part_by_path(self._current_ast, block_uri, block_uri.endswith("/*"))
+                        if isinstance(block_uri, list):
+                            # Import the new function for array handling
+                            from core.ast_md.ast import get_ast_parts_by_uri_array
+                            block_ast = get_ast_parts_by_uri_array(self._current_ast, block_uri, use_hierarchy=any(uri.endswith("/*") for uri in block_uri), tool_loop_ast=self._tool_loop_ast)
+                        else:
+                            # Single string block_uri (existing behavior)
+                            block_ast = get_ast_part_by_path(self._current_ast, block_uri, block_uri.endswith("/*"), tool_loop_ast=self._tool_loop_ast)
                         input_ast = block_ast
                     except Exception as e:
                         return {

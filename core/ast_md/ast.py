@@ -383,9 +383,28 @@ def get_ast_part_by_id_or_key(ast: AST, block_id_or_key: str, use_hierarchy: boo
         raise BlockNotFoundError(f"get_ast_part_by_id_or_key: Block with id or key '{block_id_or_key}' not found.")
     return _get_ast_part(ast, starting_node, use_hierarchy)
 
-def get_ast_part_by_path(ast: AST, block_id_or_key_path: str, use_hierarchy: bool = False) -> AST:
+def get_ast_part_by_path(ast: AST, block_id_or_key_path: str, use_hierarchy: bool = False, tool_loop_ast: Optional['AST'] = None) -> AST:
 
     # print(f"Debug: get_ast_part_by_path called with path: {block_id_or_key_path}")
+    # Support dual-AST resolution: check Tool Loop AST first, then Main AST
+    def find_node_in_asts(node_id_or_key: str):
+        """Find node in Tool Loop AST first, then Main AST"""
+        if tool_loop_ast:
+            # Try Tool Loop AST first
+            node = tool_loop_ast.get_node(id=node_id_or_key)
+            if not node:
+                node = tool_loop_ast.parser.nodes.get(node_id_or_key)
+            if node:
+                return node, tool_loop_ast
+        
+        # Try Main AST
+        node = ast.get_node(id=node_id_or_key)
+        if not node:
+            node = ast.parser.nodes.get(node_id_or_key)
+        if node:
+            return node, ast
+        
+        return None, None
 
     if block_id_or_key_path is None:
         raise ValueError("block_id_or_key_path cannot be None")
@@ -393,22 +412,19 @@ def get_ast_part_by_path(ast: AST, block_id_or_key_path: str, use_hierarchy: boo
     block_ids_or_keys = block_id_or_key_path.split('/')
     current_node = None
     
-    # First, try to find by ID
-    current_node = ast.get_node(id=block_ids_or_keys[0])
-    
-    # If not found by ID, try to find by key
-    if not current_node:
-        current_node = ast.parser.nodes.get(block_ids_or_keys[0])
+    # Use dual-AST resolution for first node
+    current_node, source_ast = find_node_in_asts(block_ids_or_keys[0])
     
     if not current_node:
         #print(f"debug before raise of block_ids_or_keys:{block_ids_or_keys}")
-        raise BlockNotFoundError(f"get_ast_part_by_path: Block with id or key '{block_ids_or_keys[0]}' not found.")
+        raise BlockNotFoundError(f"get_ast_part_by_path: Block with id or key '{block_ids_or_keys[0]}' not found in either AST.")
     
     for i in range(1, len(block_ids_or_keys)):
         found = False
         next_block_id_or_key = block_ids_or_keys[i]
         next_level = current_node.level + 1
 
+        # Continue searching in the same AST where we found the current node
         temp_node = current_node.next
         while temp_node:
             if (temp_node.id == next_block_id_or_key or temp_node.key == next_block_id_or_key) and temp_node.level == next_level:
@@ -420,5 +436,114 @@ def get_ast_part_by_path(ast: AST, block_id_or_key_path: str, use_hierarchy: boo
         if not found:
             raise BlockNotFoundError(f"get_ast_part_by_path: Block with id or key '{next_block_id_or_key}' not found at the expected level.")
 
-    # Return the AST part starting from the final current_node
-    return _get_ast_part(ast, current_node, use_hierarchy)
+    # Return the AST part starting from the final current_node using the correct source AST
+    return _get_ast_part(source_ast, current_node, use_hierarchy)
+
+def get_ast_parts_by_uri_array(ast: AST, block_uris: list, use_hierarchy: bool = False, tool_loop_ast: Optional['AST'] = None) -> AST:
+    """Get AST parts for an array of block URIs with wildcard support"""
+    from typing import List
+    import fnmatch
+    
+    def expand_wildcard_pattern(pattern: str, target_ast: AST) -> List[str]:
+        """Expand wildcard patterns like 'section/*' or '*/code' to matching block IDs"""
+        matching_paths = []
+        
+        if '*' not in pattern:
+            return [pattern]  # No wildcard, return as-is
+        
+        # Get all nodes from the target AST
+        all_nodes = list(target_ast.parser.nodes.values())
+        
+        # For simple wildcard patterns like 'section/*'
+        if pattern.endswith('/*'):
+            parent_id = pattern[:-2]  # Remove '/*'
+            
+            # Find parent node
+            parent_node = None
+            for node in all_nodes:
+                if node.id == parent_id or node.key == parent_id:
+                    parent_node = node
+                    break
+            
+            if parent_node:
+                # Find all child nodes
+                target_level = parent_node.level + 1
+                current = parent_node.next
+                while current and current.level > parent_node.level:
+                    if current.level == target_level:
+                        matching_paths.append(current.id or current.key)
+                    current = current.next
+        
+        # For patterns like '*/code' - find all nodes with matching suffix
+        elif pattern.startswith('*/'):
+            suffix = pattern[2:]  # Remove '*/'
+            for node in all_nodes:
+                if node.id and node.id.endswith(suffix):
+                    matching_paths.append(node.id)
+                elif node.key and node.key.endswith(suffix):
+                    matching_paths.append(node.key)
+        
+        # For complex patterns, use fnmatch
+        else:
+            for node in all_nodes:
+                if node.id and fnmatch.fnmatch(node.id, pattern):
+                    matching_paths.append(node.id)
+                elif node.key and fnmatch.fnmatch(node.key, pattern):
+                    matching_paths.append(node.key)
+        
+        return matching_paths
+    
+    # Collect all matching nodes
+    all_result_nodes = {}
+    
+    for block_uri in block_uris:
+        # Check both ASTs for wildcard expansion
+        matching_paths = []
+        
+        # Expand wildcards in Tool Loop AST first
+        if tool_loop_ast:
+            matching_paths.extend(expand_wildcard_pattern(block_uri, tool_loop_ast))
+        
+        # Expand wildcards in Main AST
+        matching_paths.extend(expand_wildcard_pattern(block_uri, ast))
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_paths = []
+        for path in matching_paths:
+            if path not in seen:
+                unique_paths.append(path)
+                seen.add(path)
+        
+        # Get AST parts for each matching path
+        for path in unique_paths or [block_uri]:  # Fallback to original if no matches
+            try:
+                part_ast = get_ast_part_by_path(ast, path, use_hierarchy, tool_loop_ast)
+                all_result_nodes.update(part_ast.parser.nodes)
+            except BlockNotFoundError:
+                # Skip missing blocks
+                continue
+    
+    # Create combined result AST
+    result_ast = AST("")
+    result_ast.parser.nodes = all_result_nodes
+    
+    if all_result_nodes:
+        # Set head and tail
+        sorted_nodes = sorted(all_result_nodes.values(), key=lambda n: getattr(n, 'original_order', 0))
+        result_ast.parser.head = sorted_nodes[0]
+        result_ast.parser.tail = sorted_nodes[-1]
+        
+        # Rebuild linked list
+        prev_node = None
+        for node in sorted_nodes:
+            node.prev = prev_node
+            node.next = None
+            if prev_node:
+                prev_node.next = node
+            prev_node = node
+        
+        if result_ast.parser.head:
+            result_ast.parser.head.prev = None
+    
+    return result_ast

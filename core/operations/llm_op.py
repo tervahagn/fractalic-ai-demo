@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 
 from core.ast_md.node import Node, OperationType, NodeType
-from core.ast_md.ast import AST, get_ast_part_by_path, perform_ast_operation
+from core.ast_md.ast import AST, get_ast_part_by_path, get_ast_parts_by_uri_array, perform_ast_operation
 from core.errors import BlockNotFoundError
 from core.config import Config
 from core.llm.llm_client import LLMClient  # Import the LLMClient class
@@ -16,9 +16,144 @@ from rich import print
 from rich.status import Status
 from rich.panel import Panel
 from rich.box import SQUARE
+import json
+import re
 
 # Assuming LLM_PROVIDER and API_KEY are globally set in fractalic.py
 # You can initialize LLMClient here if it's a singleton
+
+def process_tool_calls(ast: AST, tool_messages: list) -> AST:
+    """Process tool call responses and build Tool Loop AST"""
+    tool_loop_ast = AST("")
+    all_tool_content = []
+    
+    for message in tool_messages:
+        if message.get('role') == 'tool':
+            # Extract content from tool response
+            content = message.get('content', '')
+            print(f"[DEBUG] Processing tool message with content length: {len(content)}")
+            
+            # Try to parse as JSON to extract response fields
+            try:
+                # First try direct JSON parsing
+                tool_response = json.loads(content)
+                print(f"[DEBUG] Parsed tool response JSON with keys: {tool_response.keys()}")
+                if isinstance(tool_response, dict):
+                    # Look for common response fields that contain content
+                    content_fields = ['return_content', 'content', 'result', 'response', 'output']
+                    for field in content_fields:
+                        if field in tool_response and tool_response[field]:
+                            field_content = tool_response[field]
+                            print(f"[DEBUG] Found content field '{field}' with length: {len(str(field_content))}")
+                            if isinstance(field_content, str) and field_content.strip():
+                                # Handle escaped newlines in JSON strings
+                                if '\\n' in field_content:
+                                    field_content = field_content.replace('\\n', '\n')
+                                if '\\r' in field_content:
+                                    field_content = field_content.replace('\\r', '\r')
+                                if '\\t' in field_content:
+                                    field_content = field_content.replace('\\t', '\t')
+                                all_tool_content.append(field_content)
+                                print(f"[DEBUG] Added content from field '{field}' to tool content list")
+                            break
+                    else:
+                        # If no recognized content field, use the raw JSON
+                        print(f"[DEBUG] No recognized content field found, using raw JSON")
+                        all_tool_content.append(content)
+                else:
+                    print(f"[DEBUG] Tool response is not a dict, using as-is")
+                    all_tool_content.append(content)
+            except json.JSONDecodeError as e:
+                print(f"[DEBUG] JSON decode error: {e}")
+                # Try to extract the return_content field specifically for fractalic_run responses
+                try:
+                    # Look for return_content field with proper JSON string handling
+                    # First find the return_content field start
+                    import re
+                    
+                    # Find the start of return_content field
+                    return_content_start = content.find('"return_content":')
+                    if return_content_start != -1:
+                        # Find the opening quote of the value
+                        value_start = content.find('"', return_content_start + len('"return_content":'))
+                        if value_start != -1:
+                            # Track nested quotes and escapes to find the end of the string value
+                            pos = value_start + 1
+                            while pos < len(content):
+                                char = content[pos]
+                                if char == '\\':
+                                    # Skip the next character (it's escaped)
+                                    pos += 2
+                                    continue
+                                elif char == '"':
+                                    # Found the closing quote
+                                    field_content = content[value_start + 1:pos]
+                                    # Unescape JSON string literals
+                                    field_content = field_content.replace('\\"', '"').replace('\\\\', '\\')
+                                    # Handle escaped newlines
+                                    if '\\n' in field_content:
+                                        field_content = field_content.replace('\\n', '\n')
+                                    if '\\r' in field_content:
+                                        field_content = field_content.replace('\\r', '\r')
+                                    if '\\t' in field_content:
+                                        field_content = field_content.replace('\\t', '\t')
+                                    all_tool_content.append(field_content)
+                                    print(f"[DEBUG] Extracted return_content with manual parsing, length: {len(field_content)}")
+                                    break
+                                pos += 1
+                            else:
+                                print(f"[DEBUG] Could not find closing quote for return_content")
+                                all_tool_content.append(content)
+                        else:
+                            print(f"[DEBUG] Could not find return_content value start")
+                            all_tool_content.append(content)
+                    else:
+                        print(f"[DEBUG] No return_content field found, using content as-is")
+                        all_tool_content.append(content)
+                except Exception as parse_error:
+                    print(f"[DEBUG] Manual parsing failed: {parse_error}, using content as-is")
+                    all_tool_content.append(content)
+    
+    # Combine all tool content and create AST
+    if all_tool_content:
+        combined_content = "\n\n".join(all_tool_content)
+        tool_loop_ast = AST(combined_content)
+        
+        # Mark nodes as tool-generated context (but use user role for LLM compatibility)
+        for node in tool_loop_ast.parser.nodes.values():
+            node.role = "user"  # Use user role so content is treated as context, not tool responses
+            node.is_tool_generated = True
+    
+    return tool_loop_ast
+
+def insert_direct_context(ast: AST, tool_loop_ast: AST, current_node: Node):
+    """Insert tool loop content with _IN_CONTEXT_BELOW_ markers"""
+    if not tool_loop_ast.parser.nodes:
+        return
+    
+    # Create response with context markers
+    context_content = "\n\n> TOOL RESPONSE\ncontent: \"_IN_CONTEXT_BELOW_\"\n\n"
+    
+    # Add actual tool content
+    for node in tool_loop_ast.parser.nodes.values():
+        context_content += node.content + "\n\n"
+    
+    # Update current node's response
+    if hasattr(current_node, 'response_content'):
+        # Replace tool response content with context markers
+        current_response = current_node.response_content or ""
+        
+        # Find and replace tool response patterns
+        tool_response_pattern = r'(> TOOL RESPONSE[^>]*?)(\n[^>]*?)(?=\n>|\Z)'
+        
+        def replace_tool_content(match):
+            header = match.group(1)
+            return f"{header}\ncontent: \"_IN_CONTEXT_BELOW_\""
+        
+        current_response = re.sub(tool_response_pattern, replace_tool_content, current_response, flags=re.MULTILINE | re.DOTALL)
+        current_response += "\n\n" + context_content
+        
+        current_node.response_content = current_response
 
 
 def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_files=None, file_commit_hashes=None, base_dir=None) -> Optional[Node]:
@@ -114,14 +249,31 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
 
     # Handle blocks first - can be single block or array
     if block_params:
-        if block_params.get('is_multi'):
-            # Handle array of blocks
+        # Check if block_uri is an array (new enhanced functionality)
+        block_uri = block_params.get('block_uri')
+        if isinstance(block_uri, list):
+            # Handle array of block URIs with wildcard support
+            try:
+                block_ast = get_ast_parts_by_uri_array(ast, block_uri, use_hierarchy=any(uri.endswith("/*") for uri in block_uri), tool_loop_ast=tool_loop_ast)
+                if block_ast.parser.nodes:
+                    # Keep existing prompt_parts logic
+                    block_content = "\n\n".join(node.content for node in block_ast.parser.nodes.values())
+                    prompt_parts.append(block_content)
+                    
+                    # Build messages - one message per node in the combined blocks
+                    role = block_params.get('role', 'user')
+                    for node in block_ast.parser.nodes.values():
+                        messages.append({"role": role, "content": node.content})
+            except BlockNotFoundError:
+                raise ValueError(f"One or more blocks in array '{block_uri}' not found")
+        elif block_params.get('is_multi'):
+            # Handle legacy array of blocks format
             blocks = block_params.get('blocks', [])
             for block_info in blocks:
                 try:
                     block_uri = block_info.get('block_uri')
                     nested_flag = block_info.get('nested_flag', False)
-                    block_ast = get_ast_part_by_path(ast, block_uri, nested_flag)
+                    block_ast = get_ast_part_by_path(ast, block_uri, nested_flag, tool_loop_ast)
                     if block_ast.parser.nodes:
                         # Keep existing prompt_parts logic
                         block_content = "\n\n".join(node.content for node in block_ast.parser.nodes.values())
@@ -139,7 +291,7 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
             try:
                 block_uri = block_params.get('block_uri')
                 nested_flag = block_params.get('nested_flag', False)
-                block_ast = get_ast_part_by_path(ast, block_uri, nested_flag)
+                block_ast = get_ast_part_by_path(ast, block_uri, nested_flag, tool_loop_ast)
                 if block_ast.parser.nodes:
                     # Keep existing prompt_parts logic
                     block_content = "\n\n".join(node.content for node in block_ast.parser.nodes.values())
@@ -185,6 +337,9 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
     Config.API_KEY = provider_cfg.get('apiKey')
     llm_client = LLMClient(model=llm_model)
     
+    # Initialize Tool Loop AST for this LLM operation
+    tool_loop_ast = AST("")
+    
     # Set execution context for tool registry if available
     if hasattr(llm_client.client, 'registry'):
         current_file = getattr(current_node, 'created_by_file', None)
@@ -194,8 +349,13 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
             call_tree_node=call_tree_node,
             committed_files=committed_files,
             file_commit_hashes=file_commit_hashes,
-            base_dir=base_dir
+            base_dir=base_dir,
+            tool_loop_ast=tool_loop_ast  # Pass Tool Loop AST to registry
         )
+        
+        # Pass Tool Loop AST to the LLM client for real-time updates
+        if hasattr(llm_client.client, 'tool_loop_ast'):
+            llm_client.client.tool_loop_ast = tool_loop_ast
     
     actual_model = model if model else getattr(llm_client.client, 'settings', {}).get('model', llm_model)    # Add system prompt to params for LLM clients that use it
     params['system_prompt'] = system_prompt
@@ -212,6 +372,34 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
             current_node.response_content = response_text
             if 'messages' in response:
                 current_node.response_messages = response['messages']
+                
+                # Process tool calls to build Tool Loop AST
+                tool_messages = [msg for msg in response['messages'] if msg.get('role') == 'tool']
+                if tool_messages:
+                    # Update Tool Loop AST with tool responses
+                    new_tool_ast = process_tool_calls(ast, tool_messages)
+                    if new_tool_ast.parser.nodes:
+                        # Merge with existing Tool Loop AST
+                        if tool_loop_ast.parser.nodes:
+                            # Combine existing and new tool content
+                            combined_nodes = {}
+                            combined_nodes.update(tool_loop_ast.parser.nodes)
+                            combined_nodes.update(new_tool_ast.parser.nodes)
+                            tool_loop_ast.parser.nodes = combined_nodes
+                            
+                            # Update head and tail
+                            all_nodes = list(combined_nodes.values())
+                            tool_loop_ast.parser.head = all_nodes[0] if all_nodes else None
+                            tool_loop_ast.parser.tail = all_nodes[-1] if all_nodes else None
+                        else:
+                            tool_loop_ast = new_tool_ast
+                        
+                        # Update the tool registry with the new Tool Loop AST
+                        if hasattr(llm_client.client, 'registry'):
+                            llm_client.client.registry._tool_loop_ast = tool_loop_ast
+                    
+                    # Insert context integration markers
+                    insert_direct_context(ast, tool_loop_ast, current_node)
         else:
             response_text = response
             current_node.response_content = response_text

@@ -78,8 +78,9 @@ class ConsoleManager:
 #  Tool executor
 # ====================================================================
 class ToolExecutor:
-    def __init__(self, tk: ToolRegistry, ui: ConsoleManager):
+    def __init__(self, tk: ToolRegistry, ui: ConsoleManager, tool_response_callback=None):
         self.tk, self.ui = tk, ui
+        self.tool_response_callback = tool_response_callback
 
     def execute(self, fn: str, args_json: str) -> str:
         if fn not in self.tk:
@@ -88,7 +89,13 @@ class ToolExecutor:
             return json.dumps({"error": err}, indent=2, ensure_ascii=False)
         try:
             res = self.tk[fn](**json.loads(args_json or "{}"))
-            return json.dumps(res, indent=2, ensure_ascii=False)
+            result = json.dumps(res, indent=2, ensure_ascii=False)
+            
+            # Call the callback to update Tool Loop AST after each tool execution
+            if self.tool_response_callback:
+                self.tool_response_callback(fn, args_json, result)
+            
+            return result
         except Exception as e:
             self.ui.error(f"Tool '{fn}' failed: {e}")
             return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
@@ -364,8 +371,57 @@ class liteclient:
         # print("[DEBUG] Discovered tools:", list(self.registry.keys()))
         # print("[DEBUG] Tool schema:", json.dumps(self.registry.generate_schema(), indent=2))
         self.ui = ConsoleManager()
-        self.exec = ToolExecutor(self.registry, self.ui)  # registry replaces toolkit
+        self.exec = ToolExecutor(self.registry, self.ui, self._on_tool_response)  # registry replaces toolkit
         self.schema = self.registry.generate_schema()  # registry replaces toolkit
+        self.tool_loop_ast = None  # Will be set by execution context
+
+    def _on_tool_response(self, tool_name: str, args_json: str, result: str):
+        """Callback to update Tool Loop AST after each tool response"""
+        print(f"[DEBUG] _on_tool_response called: tool={tool_name}, result_len={len(result)}")
+        if self.tool_loop_ast is not None and hasattr(self, 'registry'):
+            # Import here to avoid circular imports
+            from core.operations.llm_op import process_tool_calls
+            
+            # Create a tool message from the response
+            tool_message = {
+                'role': 'tool',
+                'content': result,
+                'name': tool_name
+            }
+            
+            print(f"[DEBUG] Processing tool message for {tool_name}")
+            # Process this single tool response
+            new_tool_ast = process_tool_calls(None, [tool_message])
+            if new_tool_ast and new_tool_ast.parser.nodes:
+                print(f"[DEBUG] New tool AST has {len(new_tool_ast.parser.nodes)} nodes")
+                # Merge with existing Tool Loop AST
+                if self.tool_loop_ast.parser.nodes:
+                    # Combine existing and new tool content
+                    combined_nodes = {}
+                    combined_nodes.update(self.tool_loop_ast.parser.nodes)
+                    combined_nodes.update(new_tool_ast.parser.nodes)
+                    self.tool_loop_ast.parser.nodes = combined_nodes
+                    
+                    # Update head and tail
+                    all_nodes = list(combined_nodes.values())
+                    self.tool_loop_ast.parser.head = all_nodes[0] if all_nodes else None
+                    self.tool_loop_ast.parser.tail = all_nodes[-1] if all_nodes else None
+                    print(f"[DEBUG] Merged Tool Loop AST now has {len(combined_nodes)} nodes")
+                else:
+                    self.tool_loop_ast = new_tool_ast
+                    print(f"[DEBUG] Set new Tool Loop AST with {len(new_tool_ast.parser.nodes)} nodes")
+                
+                # Update the registry with the updated Tool Loop AST
+                if hasattr(self.registry, '_tool_loop_ast'):
+                    self.registry._tool_loop_ast = self.tool_loop_ast
+                    print(f"[DEBUG] Updated registry Tool Loop AST")
+                    # Print node IDs for debugging
+                    for node_id, node in self.tool_loop_ast.parser.nodes.items():
+                        print(f"[DEBUG] Tool Loop AST node: {node_id} (id: {getattr(node, 'id', 'None')})")
+            else:
+                print(f"[DEBUG] No new tool AST created from {tool_name} response")
+        else:
+            print(f"[DEBUG] Tool Loop AST not available or registry missing")
 
     # -----------------------------------------------------------------
     def _provider(self, op: Dict[str, Any]) -> str:
