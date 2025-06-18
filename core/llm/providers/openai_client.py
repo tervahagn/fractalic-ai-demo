@@ -705,10 +705,43 @@ class liteclient:
                                           f"response:\n{colored_response}")
                         self.ui.show("", resp_log_display)
                         
-                        # Context with clean text
-                        resp_log_context = (f"> TOOL RESPONSE, id: {tc['id']}\n"
-                                          f"response:\n{clean_response}")
-                        convo.append(resp_log_context)
+                        # Context with clean text - special handling for fractalic_run
+                        if tc["function"]["name"] == "fractalic_run" and res and res.strip().startswith('{'):
+                            # Check if this is a fractalic_run response with return_content
+                            try:
+                                response_data = json.loads(res)
+                                if isinstance(response_data, dict) and "return_content" in response_data:
+                                    # Replace JSON with marker in context
+                                    resp_log_context = (f"> TOOL RESPONSE, id: {tc['id']}\n"
+                                                      f"response:\n"
+                                                      f'content: "_IN_CONTEXT_BELOW_"')
+                                    convo.append(resp_log_context)
+                                    
+                                    # Also append the actual markdown content to context
+                                    return_content = response_data["return_content"]
+                                    # Handle escaped newlines in JSON strings
+                                    if '\\n' in return_content:
+                                        return_content = return_content.replace('\\n', '\n')
+                                    if '\\r' in return_content:
+                                        return_content = return_content.replace('\\r', '\r')
+                                    if '\\t' in return_content:
+                                        return_content = return_content.replace('\\t', '\t')
+                                    convo.append(f"\n{return_content}\n")
+                                else:
+                                    # Normal JSON response for fractalic_run without return_content
+                                    resp_log_context = (f"> TOOL RESPONSE, id: {tc['id']}\n"
+                                                      f"response:\n{clean_response}")
+                                    convo.append(resp_log_context)
+                            except json.JSONDecodeError:
+                                # Fallback to normal response if JSON parsing fails
+                                resp_log_context = (f"> TOOL RESPONSE, id: {tc['id']}\n"
+                                                  f"response:\n{clean_response}")
+                                convo.append(resp_log_context)
+                        else:
+                            # Normal tool response (not fractalic_run or not JSON)
+                            resp_log_context = (f"> TOOL RESPONSE, id: {tc['id']}\n"
+                                              f"response:\n{clean_response}")
+                            convo.append(resp_log_context)
 
                         hist.append({"role": "tool",
                                      "tool_call_id": tc["id"],

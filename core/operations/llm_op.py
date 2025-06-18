@@ -127,32 +127,28 @@ def process_tool_calls(ast: AST, tool_messages: list) -> AST:
     return tool_loop_ast
 
 def insert_direct_context(ast: AST, tool_loop_ast: AST, current_node: Node):
-    """Insert tool loop content with _IN_CONTEXT_BELOW_ markers"""
+    """Insert tool loop content with _IN_CONTEXT_BELOW_ markers and replace JSON with markdown"""
     if not tool_loop_ast.parser.nodes:
         return
     
-    # Create response with context markers
-    context_content = "\n\n> TOOL RESPONSE\ncontent: \"_IN_CONTEXT_BELOW_\"\n\n"
-    
-    # Add actual tool content
-    for node in tool_loop_ast.parser.nodes.values():
-        context_content += node.content + "\n\n"
-    
     # Update current node's response
     if hasattr(current_node, 'response_content'):
-        # Replace tool response content with context markers
         current_response = current_node.response_content or ""
         
-        # Find and replace tool response patterns
-        tool_response_pattern = r'(> TOOL RESPONSE[^>]*?)(\n[^>]*?)(?=\n>|\Z)'
+        # Simple regex to find and replace JSON blocks containing return_content
+        # This pattern matches the entire JSON block after "response:" until the next blank line or "> TOOL"
+        import re
         
-        def replace_tool_content(match):
-            header = match.group(1)
-            return f"{header}\ncontent: \"_IN_CONTEXT_BELOW_\""
+        # Note: JSON replacement now happens at the tool response generation level,
+        # not here in post-processing. This is just a placeholder for any future
+        # response content modifications if needed.
         
-        current_response = re.sub(tool_response_pattern, replace_tool_content, current_response, flags=re.MULTILINE | re.DOTALL)
-        current_response += "\n\n" + context_content
+        # Add actual tool content at the end
+        context_content = "\n\n> TOOL RESPONSE\ncontent: \"_IN_CONTEXT_BELOW_\"\n\n"
+        for node in tool_loop_ast.parser.nodes.values():
+            context_content += node.content + "\n\n"
         
+        current_response += context_content
         current_node.response_content = current_response
 
 
