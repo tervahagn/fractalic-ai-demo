@@ -119,10 +119,32 @@ def process_tool_calls(ast: AST, tool_messages: list) -> AST:
         combined_content = "\n\n".join(all_tool_content)
         tool_loop_ast = AST(combined_content)
         
-        # Mark nodes as tool-generated context (but use user role for LLM compatibility)
+        # Extract attribution metadata from tool responses
+        all_return_nodes_attribution = []
+        for message in tool_messages:
+            if message.get('role') == 'tool':
+                content = message.get('content', '')
+                try:
+                    tool_response = json.loads(content)
+                    if isinstance(tool_response, dict) and 'return_nodes_attribution' in tool_response:
+                        all_return_nodes_attribution.extend(tool_response['return_nodes_attribution'])
+                except json.JSONDecodeError:
+                    pass
+        
+        # Mark nodes as tool-generated context and apply attribution if available
+        node_index = 0
         for node in tool_loop_ast.parser.nodes.values():
             node.role = "user"  # Use user role so content is treated as context, not tool responses
             node.is_tool_generated = True
+            
+            # Apply attribution metadata from fractalic_run returns if available
+            if node_index < len(all_return_nodes_attribution):
+                attribution = all_return_nodes_attribution[node_index]
+                node.created_by = attribution.get('created_by')
+                node.created_by_file = attribution.get('created_by_file')
+                print(f"[DEBUG] Applied attribution to Tool Loop AST node: created_by={node.created_by}, created_by_file={node.created_by_file}")
+            
+            node_index += 1
     
     return tool_loop_ast
 

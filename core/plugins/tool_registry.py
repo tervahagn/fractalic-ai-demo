@@ -622,11 +622,23 @@ class ToolRegistry(dict):
             if explicit_return and run_result:
                 # Find the return content by looking for nodes with return results
                 return_content = ""
+                return_nodes_attribution = []
+                
                 for node in run_result.parser.nodes.values():
                     if hasattr(node, 'content') and node.content and '@return' not in node.content:
                         return_content += node.content + "\n"
+                        
+                        # Capture attribution metadata for later restoration
+                        return_nodes_attribution.append({
+                            "created_by": getattr(node, 'created_by', None),
+                            "created_by_file": getattr(node, 'created_by_file', None),
+                            "node_id": getattr(node, 'id', None),
+                            "node_key": getattr(node, 'key', None),
+                            "content_length": len(node.content) if node.content else 0
+                        })
                 
                 response["return_content"] = return_content.strip()
+                response["return_nodes_attribution"] = return_nodes_attribution
             else:
                 response["message"] = "Script executed successfully"
             
