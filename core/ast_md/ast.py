@@ -17,6 +17,51 @@ class AST:
     def __init__(self, content: str):
         self.parser = Parser()
         self.parser.parse(content)
+    
+    @classmethod
+    def create_with_attribution(cls, content: str, attribution_metadata: list = None):
+        """Create AST with preserved node keys from attribution metadata"""
+        ast = cls(content)
+        
+        # Apply attribution metadata to preserve original keys and attribution
+        if attribution_metadata:
+            # Convert to list to avoid "dictionary changed during iteration" error
+            nodes_list = list(ast.parser.nodes.items())
+            new_nodes_dict = {}
+            keys_to_remove = []
+            
+            node_index = 0
+            for old_key, node in nodes_list:
+                if node_index < len(attribution_metadata):
+                    attribution = attribution_metadata[node_index]
+                    
+                    # Preserve original key
+                    original_key = attribution.get('node_key')
+                    if original_key and original_key != node.key:
+                        # Update node key
+                        node.key = original_key
+                        # Plan dictionary updates for after iteration
+                        new_nodes_dict[original_key] = node
+                        if old_key != original_key:
+                            keys_to_remove.append(old_key)
+                    else:
+                        # Keep existing key
+                        new_nodes_dict[old_key] = node
+                    
+                    # Apply attribution
+                    node.created_by = attribution.get('created_by')
+                    node.created_by_file = attribution.get('created_by_file')
+                    
+                    node_index += 1
+                else:
+                    # Keep nodes without attribution
+                    new_nodes_dict[old_key] = node
+            
+            # Apply all dictionary changes after iteration is complete
+            ast.parser.nodes.clear()
+            ast.parser.nodes.update(new_nodes_dict)
+        
+        return ast
 
     def first(self) -> Optional[Node]:
         return self.parser.head

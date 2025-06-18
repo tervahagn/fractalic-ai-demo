@@ -48,3 +48,11 @@ class Node:
     @property
     def hash(self) -> str:
         return hashlib.md5(self.content.encode()).hexdigest()[:8]
+    
+    @classmethod
+    def create_with_key(cls, preserve_key: str = None, **kwargs):
+        """Create a Node with a specific key (for preserving attribution)"""
+        node = cls(**kwargs)
+        if preserve_key:
+            node.key = preserve_key
+        return node

@@ -114,37 +114,30 @@ def process_tool_calls(ast: AST, tool_messages: list) -> AST:
                     print(f"[DEBUG] Manual parsing failed: {parse_error}, using content as-is")
                     all_tool_content.append(content)
     
-    # Combine all tool content and create AST
+    # Extract attribution metadata from tool responses first
+    all_return_nodes_attribution = []
+    for message in tool_messages:
+        if message.get('role') == 'tool':
+            content = message.get('content', '')
+            try:
+                tool_response = json.loads(content)
+                if isinstance(tool_response, dict) and 'return_nodes_attribution' in tool_response:
+                    all_return_nodes_attribution.extend(tool_response['return_nodes_attribution'])
+            except json.JSONDecodeError:
+                pass
+    
+    # Combine all tool content and create AST with preserved attribution
     if all_tool_content:
         combined_content = "\n\n".join(all_tool_content)
-        tool_loop_ast = AST(combined_content)
         
-        # Extract attribution metadata from tool responses
-        all_return_nodes_attribution = []
-        for message in tool_messages:
-            if message.get('role') == 'tool':
-                content = message.get('content', '')
-                try:
-                    tool_response = json.loads(content)
-                    if isinstance(tool_response, dict) and 'return_nodes_attribution' in tool_response:
-                        all_return_nodes_attribution.extend(tool_response['return_nodes_attribution'])
-                except json.JSONDecodeError:
-                    pass
+        # Use specialized AST creation that preserves keys and attribution
+        tool_loop_ast = AST.create_with_attribution(combined_content, all_return_nodes_attribution)
         
-        # Mark nodes as tool-generated context and apply attribution if available
-        node_index = 0
+        # Mark nodes as tool-generated context
         for node in tool_loop_ast.parser.nodes.values():
             node.role = "user"  # Use user role so content is treated as context, not tool responses
             node.is_tool_generated = True
-            
-            # Apply attribution metadata from fractalic_run returns if available
-            if node_index < len(all_return_nodes_attribution):
-                attribution = all_return_nodes_attribution[node_index]
-                node.created_by = attribution.get('created_by')
-                node.created_by_file = attribution.get('created_by_file')
-                print(f"[DEBUG] Applied attribution to Tool Loop AST node: created_by={node.created_by}, created_by_file={node.created_by_file}")
-            
-            node_index += 1
+            print(f"[DEBUG] Tool Loop AST node with preserved attribution: key={node.key}, id={node.id}, created_by={node.created_by}, created_by_file={node.created_by_file}")
     
     return tool_loop_ast
 
@@ -398,18 +391,31 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
                     # Update Tool Loop AST with tool responses
                     new_tool_ast = process_tool_calls(ast, tool_messages)
                     if new_tool_ast.parser.nodes:
-                        # Merge with existing Tool Loop AST
+                        # Merge with existing Tool Loop AST, avoiding duplicates by key
                         if tool_loop_ast.parser.nodes:
-                            # Combine existing and new tool content
-                            combined_nodes = {}
-                            combined_nodes.update(tool_loop_ast.parser.nodes)
-                            combined_nodes.update(new_tool_ast.parser.nodes)
-                            tool_loop_ast.parser.nodes = combined_nodes
+                            # Check for duplicate keys and avoid adding them
+                            for key, new_node in new_tool_ast.parser.nodes.items():
+                                if key not in tool_loop_ast.parser.nodes:
+                                    tool_loop_ast.parser.nodes[key] = new_node
+                                    print(f"[DEBUG] Added new Tool Loop AST node: {key} (id: {new_node.id})")
+                                else:
+                                    print(f"[DEBUG] Skipped duplicate Tool Loop AST node: {key} (id: {new_node.id})")
                             
-                            # Update head and tail
-                            all_nodes = list(combined_nodes.values())
-                            tool_loop_ast.parser.head = all_nodes[0] if all_nodes else None
-                            tool_loop_ast.parser.tail = all_nodes[-1] if all_nodes else None
+                            # Update head and tail based on document order
+                            all_nodes = list(tool_loop_ast.parser.nodes.values())
+                            if all_nodes:
+                                # Sort by creation order or maintain linked list order
+                                tool_loop_ast.parser.head = all_nodes[0]
+                                tool_loop_ast.parser.tail = all_nodes[-1]
+                                
+                                # Rebuild linked list to maintain proper order
+                                prev_node = None
+                                for node in all_nodes:
+                                    node.prev = prev_node
+                                    node.next = None
+                                    if prev_node:
+                                        prev_node.next = node
+                                    prev_node = node
                         else:
                             tool_loop_ast = new_tool_ast
                         
