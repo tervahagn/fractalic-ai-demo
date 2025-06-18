@@ -346,7 +346,8 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
             committed_files=committed_files,
             file_commit_hashes=file_commit_hashes,
             base_dir=base_dir,
-            tool_loop_ast=tool_loop_ast  # Pass Tool Loop AST to registry
+            tool_loop_ast=tool_loop_ast,  # Pass Tool Loop AST to registry
+            current_node=current_node  # Pass current @llm operation node for attribution
         )
         
         # Pass Tool Loop AST to the LLM client for real-time updates

@@ -437,7 +437,7 @@ class ToolRegistry(dict):
             # print(f"[ToolRegistry] Discovered tools: {', '.join(self._tool_names)}")
             del self._tool_names
     
-    def set_execution_context(self, ast, current_file, call_tree_node, committed_files=None, file_commit_hashes=None, base_dir=None, tool_loop_ast=None):
+    def set_execution_context(self, ast, current_file, call_tree_node, committed_files=None, file_commit_hashes=None, base_dir=None, tool_loop_ast=None, current_node=None):
         """Set current execution context for built-in tools like fractalic_run."""
         self._current_ast = ast
         self._current_file = current_file
@@ -446,6 +446,7 @@ class ToolRegistry(dict):
         self._file_commit_hashes = file_commit_hashes or {}
         self._base_dir = base_dir
         self._tool_loop_ast = tool_loop_ast
+        self._current_node = current_node
     
     def _register_builtin_tools(self):
         """Register built-in tools like fractalic_run."""
@@ -539,6 +540,13 @@ class ToolRegistry(dict):
                         else:
                             # Single string block_uri (existing behavior)
                             block_ast = get_ast_part_by_path(self._current_ast, block_uri, block_uri.endswith("/*"), tool_loop_ast=self._tool_loop_ast)
+                        
+                        # Update attribution for all nodes from block_uri to the parent @llm operation
+                        if block_ast and block_ast.parser.nodes:
+                            for node in block_ast.parser.nodes.values():
+                                node.created_by = getattr(self._current_node, 'key', None)
+                                node.created_by_file = getattr(self._current_node, 'created_by_file', None)
+                        
                         input_ast = block_ast
                     except Exception as e:
                         return {
@@ -547,14 +555,16 @@ class ToolRegistry(dict):
                         }
                 
                 if prompt:
-                    # Create a prompt node
+                    # Create a prompt node with attribution to the parent @llm operation
                     prompt_node = Node(
                         type=NodeType.HEADING,
                         name="Input Parameters",
                         level=1,
                         content=f"# Input Parameters\n{prompt}",
                         id="InputParameters",
-                        key=str(uuid.uuid4())[:8]
+                        key=str(uuid.uuid4())[:8],
+                        created_by=getattr(self._current_node, 'key', None),
+                        created_by_file=getattr(self._current_node, 'created_by_file', None)
                     )
                     
                     if input_ast and input_ast.parser.nodes:
