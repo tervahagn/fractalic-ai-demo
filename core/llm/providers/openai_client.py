@@ -22,6 +22,7 @@ import openai                                           # raw SDK for file uploa
 import warnings
 from core.plugins.tool_registry import ToolRegistry    # NEW import
 from .rich_formatter import RichFormatter              # Rich functionality moved here
+from core.config import Config                         # For context render mode configuration
 
 warnings.filterwarnings(
     "ignore",
@@ -711,22 +712,31 @@ class liteclient:
                             try:
                                 response_data = json.loads(res)
                                 if isinstance(response_data, dict) and "return_content" in response_data:
-                                    # Replace JSON with marker in context
-                                    resp_log_context = (f"> TOOL RESPONSE, id: {tc['id']}\n"
-                                                      f"response:\n"
-                                                      f'content: "_IN_CONTEXT_BELOW_"')
-                                    convo.append(resp_log_context)
+                                    # Check context render mode to determine behavior
+                                    context_render_mode = getattr(Config, 'CONTEXT_RENDER_MODE', 'direct')
                                     
-                                    # Also append the actual markdown content to context
-                                    return_content = response_data["return_content"]
-                                    # Handle escaped newlines in JSON strings
-                                    if '\\n' in return_content:
-                                        return_content = return_content.replace('\\n', '\n')
-                                    if '\\r' in return_content:
-                                        return_content = return_content.replace('\\r', '\r')
-                                    if '\\t' in return_content:
-                                        return_content = return_content.replace('\\t', '\t')
-                                    convo.append(f"\n{return_content}\n")
+                                    if context_render_mode == 'direct':
+                                        # "direct" mode: Replace JSON with marker and render markdown directly
+                                        resp_log_context = (f"> TOOL RESPONSE, id: {tc['id']}\n"
+                                                          f"response:\n"
+                                                          f'content: "_IN_CONTEXT_BELOW_"')
+                                        convo.append(resp_log_context)
+                                        
+                                        # Also append the actual markdown content to context
+                                        return_content = response_data["return_content"]
+                                        # Handle escaped newlines in JSON strings
+                                        if '\\n' in return_content:
+                                            return_content = return_content.replace('\\n', '\n')
+                                        if '\\r' in return_content:
+                                            return_content = return_content.replace('\\r', '\r')
+                                        if '\\t' in return_content:
+                                            return_content = return_content.replace('\\t', '\t')
+                                        convo.append(f"\n{return_content}\n")
+                                    else:  # context_render_mode == 'json'
+                                        # "json" mode: Keep actual JSON values, no direct markdown rendering
+                                        resp_log_context = (f"> TOOL RESPONSE, id: {tc['id']}\n"
+                                                          f"response:\n{clean_response}")
+                                        convo.append(resp_log_context)
                                 else:
                                     # Normal JSON response for fractalic_run without return_content
                                     resp_log_context = (f"> TOOL RESPONSE, id: {tc['id']}\n"

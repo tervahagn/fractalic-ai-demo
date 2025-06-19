@@ -40,7 +40,7 @@ original_open = open
 
 
 def run_fractalic(input_file, task_file=None, param_input_user_request=None, capture_output=False, 
-                 model=None, api_key=None, operation=None, show_operations=False):
+                 model=None, api_key=None, operation=None, show_operations=False, context_render_mode=None):
     """
     Run a Fractalic script programmatically - the core execution function.
     
@@ -53,6 +53,7 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
         api_key: LLM API key (overrides settings)
         operation: Default operation to perform
         show_operations: Make operations visible to LLM
+        context_render_mode: Context rendering mode - "direct" (default) or "json"
     
     Returns:
         dict: Execution result with success status, output, return information, and provider details
@@ -142,6 +143,7 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
         Config.LLM_PROVIDER = provider
         Config.API_KEY = final_api_key
         Config.DEFAULT_OPERATION = operation or settings.get('defaultOperation', 'append')
+        Config.CONTEXT_RENDER_MODE = context_render_mode or settings.get('contextRenderMode', 'direct')
         
         # Set environment variable for API key
         os.environ[f"{provider.upper()}_API_KEY"] = final_api_key
@@ -390,6 +392,8 @@ def main():
                        help='Part path for ParamInput-UserRequest', default=None)
     parser.add_argument('-v', '--show-operations', action='store_true',
                        help='Make operations visible to LLM (overrides TOML setting)')
+    parser.add_argument('--context-render-mode', choices=['direct', 'json'], default=None,
+                       help='Context rendering mode: "direct" (replace JSON with markers, render markdown) or "json" (preserve JSON values, no direct rendering)')
 
     args = parser.parse_args()
 
@@ -402,7 +406,8 @@ def main():
             model=args.model,
             api_key=args.api_key,
             operation=args.operation,
-            show_operations=args.show_operations
+            show_operations=args.show_operations,
+            context_render_mode=args.context_render_mode
         )
         
         if not result['success']:

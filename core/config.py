@@ -16,6 +16,7 @@ class Config:
     SYSTEM_PROMPT = None  # TODO: not used now, implement later
 
     TOML_SETTINGS = None # it store raw file content of settings.toml
+    CONTEXT_RENDER_MODE = "direct"  # "direct" or "json" - controls how tool responses are rendered in context
     #base_url = None  # Add base_url property
 
 # Limit for @goto operation for one node in each run context
