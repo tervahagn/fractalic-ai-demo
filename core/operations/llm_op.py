@@ -142,27 +142,53 @@ def process_tool_calls(ast: AST, tool_messages: list) -> AST:
     return tool_loop_ast
 
 def insert_direct_context(ast: AST, tool_loop_ast: AST, current_node: Node):
-    """Insert tool loop content with _IN_CONTEXT_BELOW_ markers and replace JSON with markdown"""
+    """Insert tool loop AST nodes directly into main AST while preserving keys and identity"""
     if not tool_loop_ast.parser.nodes:
         return
     
-    # Update current node's response
+    # Instead of string concatenation, directly merge Tool Loop AST nodes into main AST
+    # This preserves the original keys and node identity from cross-agent execution
+    
+    # Find the insertion point (after current_node)
+    insertion_point = current_node
+    
+    # Insert Tool Loop AST nodes directly into the main AST
+    for tool_node in tool_loop_ast.parser.nodes.values():
+        # Create a copy of the tool node to avoid reference issues
+        import copy
+        new_node = copy.deepcopy(tool_node)
+        
+        # Preserve the original key and identity from Tool Loop AST
+        new_node.key = tool_node.key
+        new_node.created_by = tool_node.created_by
+        new_node.created_by_file = tool_node.created_by_file
+        new_node.is_tool_generated = True
+        new_node.role = "user"  # Mark as user content for context
+        
+        # Insert the node into the main AST after the current node
+        new_node.prev = insertion_point
+        new_node.next = insertion_point.next
+        
+        if insertion_point.next:
+            insertion_point.next.prev = new_node
+        else:
+            # This is the new tail
+            ast.parser.tail = new_node
+            
+        insertion_point.next = new_node
+        
+        # Add to the main AST nodes dictionary with original key
+        ast.parser.nodes[new_node.key] = new_node
+        
+        # Move insertion point for next node
+        insertion_point = new_node
+        
+        print(f"[DEBUG] Direct AST merge: inserted node {new_node.key} (id: {new_node.id}) with preserved identity")
+    
+    # Update current node's response to include reference markers
     if hasattr(current_node, 'response_content'):
         current_response = current_node.response_content or ""
-        
-        # Simple regex to find and replace JSON blocks containing return_content
-        # This pattern matches the entire JSON block after "response:" until the next blank line or "> TOOL"
-        import re
-        
-        # Note: JSON replacement now happens at the tool response generation level,
-        # not here in post-processing. This is just a placeholder for any future
-        # response content modifications if needed.
-        
-        # Add actual tool content at the end
         context_content = "\n\n> TOOL RESPONSE\ncontent: \"_IN_CONTEXT_BELOW_\"\n\n"
-        for node in tool_loop_ast.parser.nodes.values():
-            context_content += node.content + "\n\n"
-        
         current_response += context_content
         current_node.response_content = current_response
 
@@ -460,42 +486,61 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(response_text)
 
-    # Handle header
-    header = ""
-    use_header = params.get('use-header')
-    if use_header is not None:
-        if use_header.lower() != "none":
-            header = f"{use_header}\n"
-    else:
-        header = "# LLM response block\n"
+    # Always store response content for context file generation
+    current_node.response_content = response_text
+    
+    # Handle response AST creation and insertion
+    # Skip AST operation if direct context was already inserted to prevent duplicate nodes
+    skip_ast_operation = bool(tool_loop_ast.parser.nodes)
+    
+    if not skip_ast_operation:
+        # Handle header
+        header = ""
+        use_header = params.get('use-header')
+        if use_header is not None:
+            if use_header.lower() != "none":
+                header = f"{use_header}\n"
+        else:
+            header = "# LLM response block\n"
 
-    response_ast = AST(f"{header}{response_text}\n")
-    for node_key, node in response_ast.parser.nodes.items():
-        node.role = "assistant"
-        node.created_by = current_node.key  # Store the ID of the operation node that triggered this response
-        node.created_by_file = current_node.created_by_file # set the file path
+        response_ast = AST(f"{header}{response_text}\n")
+        for node_key, node in response_ast.parser.nodes.items():
+            node.role = "assistant"
+            node.created_by = current_node.key  # Store the ID of the operation node that triggered this response
+            node.created_by_file = current_node.created_by_file # set the file path
+
+        # Handle target block insertion
+        operation_type = OperationType(params.get('mode', Config.DEFAULT_OPERATION))
+
+        if target_block_uri:
+            try:
+                target_node = ast.get_node_by_path(target_block_uri)
+                target_key = target_node.key
+            except BlockNotFoundError:
+                raise ValueError(f"Target block '{target_block_uri}' not found")
+        else:
+            target_key = current_node.key
+
+        perform_ast_operation(
+            src_ast=response_ast,
+            src_path="",
+            src_hierarchy=False,
+            dest_ast=ast,
+            dest_path=target_key,
+            dest_hierarchy=target_nested,
+            operation=operation_type
+        )
+    else:
+        print(f"[DEBUG] Skipping AST operation - direct context already inserted {len(tool_loop_ast.parser.nodes)} nodes")
+        # When skipping AST operation, append response content to current node to preserve tool calls in context file
+        use_header = params.get('use-header')
+        if use_header is not None and use_header.lower() != "none":
+            header = f"\n{use_header}\n"
+        else:
+            header = "\n# Complete Workflow Results\n"
         
-
-    # Handle target block insertion
-    operation_type = OperationType(params.get('mode', Config.DEFAULT_OPERATION))
-
-    if target_block_uri:
-        try:
-            target_node = ast.get_node_by_path(target_block_uri)
-            target_key = target_node.key
-        except BlockNotFoundError:
-            raise ValueError(f"Target block '{target_block_uri}' not found")
-    else:
-        target_key = current_node.key
-
-    perform_ast_operation(
-        src_ast=response_ast,
-        src_path="",
-        src_hierarchy=False,
-        dest_ast=ast,
-        dest_path=target_key,
-        dest_hierarchy=target_nested,
-        operation=operation_type
-    )
+        # Append response content to current node's content to ensure it appears in context file
+        current_node.content += f"{header}{response_text}\n"
+        print(f"[DEBUG] Appended response content to current node to preserve tool calls in context file")
 
     return current_node.next

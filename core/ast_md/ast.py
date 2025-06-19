@@ -20,42 +20,59 @@ class AST:
     
     @classmethod
     def create_with_attribution(cls, content: str, attribution_metadata: list = None):
-        """Create AST with preserved node keys from attribution metadata"""
+        """Create AST with preserved node keys based on content matching for true identity preservation"""
+        import hashlib
         ast = cls(content)
         
-        # Apply attribution metadata to preserve original keys and attribution
+        # Apply attribution metadata with content-based matching for robust identity preservation
         if attribution_metadata:
-            # Convert to list to avoid "dictionary changed during iteration" error
+            # Create content-to-attribution mapping for robust matching
+            attribution_by_content = {}
+            attribution_by_hash = {}
+            
+            for attr in attribution_metadata:
+                # Use content hash for primary matching
+                attr_content = attr.get('content', '')
+                if attr_content:
+                    content_hash = hashlib.md5(attr_content.encode()).hexdigest()[:8]
+                    attribution_by_content[attr_content] = attr
+                    attribution_by_hash[content_hash] = attr
+            
+            # Convert to list to avoid "dictionary changed during iteration" error  
             nodes_list = list(ast.parser.nodes.items())
             new_nodes_dict = {}
-            keys_to_remove = []
             
-            node_index = 0
             for old_key, node in nodes_list:
-                if node_index < len(attribution_metadata):
-                    attribution = attribution_metadata[node_index]
-                    
-                    # Preserve original key
+                attribution = None
+                
+                # Try exact content match first (most reliable)
+                if node.content in attribution_by_content:
+                    attribution = attribution_by_content[node.content]
+                # Try content hash match as fallback
+                elif node.hash in attribution_by_hash:
+                    attribution = attribution_by_hash[node.hash]
+                
+                if attribution:
+                    # Use original key for identical content to preserve node identity
                     original_key = attribution.get('node_key')
-                    if original_key and original_key != node.key:
-                        # Update node key
+                    if original_key:
                         node.key = original_key
-                        # Plan dictionary updates for after iteration
-                        new_nodes_dict[original_key] = node
-                        if old_key != original_key:
-                            keys_to_remove.append(old_key)
+                        print(f"[DEBUG] Identity preservation: matched content to original key {original_key}")
                     else:
-                        # Keep existing key
-                        new_nodes_dict[old_key] = node
+                        # Use content-based key for deterministic identity
+                        node.key = node.hash
+                        print(f"[DEBUG] Identity preservation: using content-based key {node.hash}")
                     
-                    # Apply attribution
+                    # Apply attribution metadata
                     node.created_by = attribution.get('created_by')
                     node.created_by_file = attribution.get('created_by_file')
                     
-                    node_index += 1
+                    new_nodes_dict[node.key] = node
                 else:
-                    # Keep nodes without attribution
-                    new_nodes_dict[old_key] = node
+                    # New content gets content-based key for deterministic identity across contexts
+                    print(f"[DEBUG] Identity preservation: new content using content-based key {node.hash}")
+                    node.key = node.hash
+                    new_nodes_dict[node.key] = node
             
             # Apply all dictionary changes after iteration is complete
             ast.parser.nodes.clear()

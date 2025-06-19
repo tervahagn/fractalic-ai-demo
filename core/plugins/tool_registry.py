@@ -628,12 +628,14 @@ class ToolRegistry(dict):
                     if hasattr(node, 'content') and node.content and '@return' not in node.content:
                         return_content += node.content + "\n"
                         
-                        # Capture attribution metadata for later restoration
+                        # Capture attribution metadata for later restoration including content for robust matching
                         return_nodes_attribution.append({
                             "created_by": getattr(node, 'created_by', None),
                             "created_by_file": getattr(node, 'created_by_file', None),
                             "node_id": getattr(node, 'id', None),
                             "node_key": getattr(node, 'key', None),
+                            "content": node.content,  # Include full content for robust content-based matching
+                            "content_hash": node.hash,  # Include content hash for fallback matching
                             "content_length": len(node.content) if node.content else 0
                         })
                 
