@@ -50,7 +50,7 @@ ENV PYTHONPATH=/app
 USER appuser
 
 # Expose the necessary ports
-EXPOSE 8000 3000
+EXPOSE 8000 3000 8001 8002 8003 8004 5859
 
 # Start Supervisor
 CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
