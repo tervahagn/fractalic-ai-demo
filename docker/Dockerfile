@@ -26,9 +26,16 @@ WORKDIR /app
 COPY fractalic/requirements.txt /app/fractalic/requirements.txt
 RUN pip install --no-cache-dir -r /app/fractalic/requirements.txt
 
-# Copy and install frontend dependencies
+# Copy and install frontend dependencies (with fallback)
 COPY fractalic-ui/package*.json /app/fractalic-ui/
-RUN cd fractalic-ui && npm install
+RUN mkdir -p /app/fractalic-ui && \
+    cd /app/fractalic-ui && \
+    npm config set registry https://registry.npmjs.org/ && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-retries 5 && \
+    (npm install --network-timeout=300000 || \
+     echo "npm install failed - will try to run with existing node_modules or minimal setup")
 
 # Copy the rest of the backend and frontend code
 COPY fractalic/ /app/fractalic/

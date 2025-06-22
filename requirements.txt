@@ -4,6 +4,7 @@ aiohttp-cors
 python-dotenv>=1.0.0
 groq
 openai
+litellm>=1.70.0
 requests
 replicate
 uvicorn

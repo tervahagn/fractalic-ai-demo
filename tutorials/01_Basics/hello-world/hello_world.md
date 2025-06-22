@@ -6,3 +6,7 @@ prompt: ls -la
 
 @llm
 prompt: Please abalyze file list and give me nice summary. Format list as Markdown table
+use-header: "# File summary"
+
+@return
+block: file-summary/*
