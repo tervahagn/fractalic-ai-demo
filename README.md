@@ -233,6 +233,7 @@ to: "document-header"
 | media | No | Array | File paths for additional media context | - |
 | save-to-file | No | String | File path to save raw response | - |
 | use-header | No | String | Header for LLM response | `# LLM Response block` |
+| header-auto-align | No | Boolean | Auto-adjust header levels in response based on current context | `false` |
 | mode | No | String | Merge mode (`"append"`, `"prepend"`, `"replace"`) | Configuration default |
 | to | No | String | Target block reference | - |
 | provider | No | String | Override for language model provider | Configuration default |
@@ -451,6 +452,7 @@ For any operation that accepts a `use-header` parameter, the special value `"non
 | `file`              | –    | ✓       | –      | ✓     | –       | –     |
 | `prompt`            | ✓    | –       | ✓      | ✓     | ✓       | –     |
 | `use-header`        | ✓    | –       | ✓      | ✓     | ✓       | –     |
+| `header-auto-align` | ✓    | –       | –      | –     | –       | –     |
 | **Specialized**     |      |         |        |       |         |       |
 | `provider`          | ✓    | –       | –      | –     | –       | –     |
 | `model`             | ✓    | –       | –      | –     | –       | –     |
