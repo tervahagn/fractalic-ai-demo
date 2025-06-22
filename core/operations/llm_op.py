@@ -196,9 +196,69 @@ def insert_direct_context(ast: AST, tool_loop_ast: AST, current_node: Node):
 def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_files=None, file_commit_hashes=None, base_dir=None) -> Optional[Node]:
     """Process @llm operation with updated schema support"""
     console = Console(force_terminal=True)
-
+    
     # Extract system prompts first (always available)
     system_prompt = ast.get_system_prompts()
+
+    def get_current_header_level(node: Node) -> int:
+        """Get the level of the last heading before the given node."""
+        current = ast.first()
+        last_header_level = 0  # Default to root level if no headers found
+        
+        while current and current != node:
+            if current.type == NodeType.HEADING and not (hasattr(current, 'is_system') and current.is_system):
+                last_header_level = current.level
+            current = current.next        
+        return last_header_level
+
+    def adjust_header_levels(text: str, base_level: int) -> str:
+        """Adjust header levels in text so minimum header becomes base_level + 1."""
+        if base_level <= 0:
+            return text
+            
+        lines = text.split('\n')
+        
+        # First pass: find the minimum header level in the text
+        min_header_level = None
+        for line in lines:
+            if line.strip().startswith('#'):
+                header_match = re.match(r'^(#+)\s*(.*)', line.strip())
+                if header_match:
+                    current_level = len(header_match.group(1))
+                    if min_header_level is None or current_level < min_header_level:
+                        min_header_level = current_level
+        
+        # If no headers found, return original text
+        if min_header_level is None:
+            return text
+        
+        # Calculate the adjustment needed
+        # We want min_header_level to become base_level + 1
+        target_min_level = base_level + 1
+        level_adjustment = target_min_level - min_header_level
+        
+        # Second pass: adjust all headers
+        adjusted_lines = []
+        for line in lines:
+            if line.strip().startswith('#'):
+                header_match = re.match(r'^(#+)\s*(.*)', line.strip())
+                if header_match:
+                    current_hashes = header_match.group(1)
+                    content = header_match.group(2)
+                    current_level = len(current_hashes)
+                    
+                    # Apply the level adjustment
+                    new_level = current_level + level_adjustment
+                    # Ensure we don't go below level 1
+                    new_level = max(1, new_level)
+                    new_hashes = '#' * new_level
+                    adjusted_lines.append(f"{new_hashes} {content}")
+                else:
+                    adjusted_lines.append(line)
+            else:
+                adjusted_lines.append(line)
+        
+        return '\n'.join(adjusted_lines)
 
     def get_previous_headings(node: Node) -> str:
         context = []
@@ -488,28 +548,38 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
 
     # Always store response content for context file generation
     current_node.response_content = response_text
-    
-    # Handle response AST creation and insertion
+      # Handle response AST creation and insertion
     # Skip AST operation if direct context was already inserted to prevent duplicate nodes
     skip_ast_operation = bool(tool_loop_ast.parser.nodes)
     
-    if not skip_ast_operation:
-        # Handle header
+    if not skip_ast_operation:        # Check if header-auto-align is enabled
+        header_auto_align = params.get('header-auto-align', False)
+        processed_response_text = response_text
+        
+        if header_auto_align:
+            current_header_level = get_current_header_level(current_node)
+            processed_response_text = adjust_header_levels(response_text, current_header_level)
+        
+        # Handle header (don't auto-align the use-header itself)
         header = ""
         use_header = params.get('use-header')
         if use_header is not None:
             if use_header.lower() != "none":
                 header = f"{use_header}\n"
         else:
-            header = "# LLM response block\n"
+            # Apply header-auto-align to default header if enabled
+            if header_auto_align:
+                current_header_level = get_current_header_level(current_node)
+                adjusted_default_header = adjust_header_levels("# LLM response block", current_header_level)
+                header = f"{adjusted_default_header}\n"
+            else:
+                header = "# LLM response block\n"
 
-        response_ast = AST(f"{header}{response_text}\n")
+        response_ast = AST(f"{header}{processed_response_text}\n")
         for node_key, node in response_ast.parser.nodes.items():
             node.role = "assistant"
             node.created_by = current_node.key  # Store the ID of the operation node that triggered this response
-            node.created_by_file = current_node.created_by_file # set the file path
-
-        # Handle target block insertion
+            node.created_by_file = current_node.created_by_file # set the file path        # Handle target block insertion
         operation_type = OperationType(params.get('mode', Config.DEFAULT_OPERATION))
 
         if target_block_uri:
@@ -533,14 +603,28 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
     else:
         print(f"[DEBUG] Skipping AST operation - direct context already inserted {len(tool_loop_ast.parser.nodes)} nodes")
         # When skipping AST operation, append response content to current node to preserve tool calls in context file
+        
+        # Check if header-auto-align is enabled
+        header_auto_align = params.get('header-auto-align', False)
+        processed_response_text = response_text        
+        if header_auto_align:
+            current_header_level = get_current_header_level(current_node)
+            processed_response_text = adjust_header_levels(response_text, current_header_level)
+        
         use_header = params.get('use-header')
         if use_header is not None and use_header.lower() != "none":
             header = f"\n{use_header}\n"
         else:
-            header = "\n# Complete Workflow Results\n"
+            # Apply header-auto-align to default header if enabled
+            if header_auto_align:
+                current_header_level = get_current_header_level(current_node)
+                adjusted_default_header = adjust_header_levels("# Complete Workflow Results", current_header_level)
+                header = f"\n{adjusted_default_header}\n"
+            else:
+                header = "\n# Complete Workflow Results\n"
         
         # Append response content to current node's content to ensure it appears in context file
-        current_node.content += f"{header}{response_text}\n"
+        current_node.content += f"{header}{processed_response_text}\n"
         print(f"[DEBUG] Appended response content to current node to preserve tool calls in context file")
 
     return current_node.next
