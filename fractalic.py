@@ -206,22 +206,35 @@ def run_fractalic(input_file, task_file=None, param_input_user_request=None, cap
             # Extract return content if there was an explicit return
             try:
                 if explicit_return and result_nodes:
-                    # Extract content directly from nodes
-                    if hasattr(result_nodes, 'parser') and result_nodes.parser.nodes:
-                        content_parts = []
-                        try:
-                            current = result_nodes.first()
-                            while current:
-                                if hasattr(current, 'content') and current.content:
-                                    # Format content similar to render_ast_to_markdown
-                                    formatted_content = '\n'.join(current.content.splitlines()) + '\n'
-                                    content_parts.append(formatted_content)
-                                current = current.next
-                            
-                            if content_parts:
-                                return_content = ''.join(content_parts)
-                        except Exception as e:
-                            print(f"DEBUG: Error in content extraction: {e}")
+                    # Use the proper render_ast_to_markdown function instead of manual extraction
+                    import tempfile
+                    
+                    try:
+                        # Create temporary file to render content
+                        with tempfile.NamedTemporaryFile(mode='w+', suffix='.ctx', delete=False) as temp_file:
+                            temp_path = temp_file.name
+                        
+                        # Render the AST to markdown using the proper function
+                        render_ast_to_markdown(result_nodes, temp_path)
+                        
+                        # Read back the properly rendered content
+                        with open(temp_path, 'r', encoding='utf-8') as f:
+                            return_content = f.read()
+                        
+                        # Clean up temporary file
+                        os.unlink(temp_path)
+                        
+                    except Exception as e:
+                        print(f"DEBUG: Error in AST rendering: {e}")
+                        # Fallback: try to read from the ctx_file if it exists
+                        if ctx_file and os.path.exists(ctx_file):
+                            try:
+                                with open(ctx_file, 'r', encoding='utf-8') as f:
+                                    return_content = f.read()
+                                print(f"DEBUG: Successfully read content from ctx_file: {ctx_file}")
+                            except Exception as ctx_e:
+                                print(f"DEBUG: Failed to read ctx_file {ctx_file}: {ctx_e}")
+                                
             except Exception as e:
                 print(f"DEBUG: Exception in return content extraction: {e}")
                 
