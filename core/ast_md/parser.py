@@ -29,7 +29,7 @@ operations:
       file:
         type: string
         x-process: path
-        description: "Source path: folder/file.md"
+        description: "Source path: folder/file.md or folder/file.ctx"
       block:
         type: string
         x-process: block-path
@@ -83,6 +83,10 @@ operations:
       use-header:
         type: string
         description: "if provided - header for the block that will contain LLM response. If contains {id=X}, creates block with that ID. Use 'none' to omit header completely (case-insensitive)"
+      header-auto-align:
+        type: boolean
+        default: false
+        description: "if true, automatically adjusts header levels in LLM response based on current context header level. All headers in response will be at least one level deeper than the current header context."
       mode:
         type: string
         enum: ["append", "prepend", "replace"]
@@ -305,11 +309,13 @@ formats:
       - "section1/subsection/block/*"
 
   file_path:
-    pattern: '^(?:[a-zA-Z0-9-_/]+/)?[a-zA-Z0-9-_]+\.md$'
+    pattern: '^(?:[a-zA-Z0-9-_/]+/)?[a-zA-Z0-9-_]+\.(md|ctx)$'
     description: "Valid file path format"
     examples:
       - "file.md"
+      - "file.ctx"
       - "folder/subfolder/file.md"
+      - "folder/subfolder/file.ctx"
 
 computed_fields:
   path_processor:
@@ -317,6 +323,14 @@ computed_fields:
     generates:
       from-path: "folder1/folder2"
       from-file: "file.md"
+      from-block-URI: "block1/block2"
+      from-nested-flag: true
+  
+  path_processor_ctx:
+    input: "folder1/folder2/file.ctx/block1/block2/*"
+    generates:
+      from-path: "folder1/folder2"
+      from-file: "file.ctx"
       from-block-URI: "block1/block2"
       from-nested-flag: true
 
@@ -439,7 +453,7 @@ class SchemaProcessor:
 
         file_idx = None
         for idx, part in enumerate(path_parts):
-            if part.endswith('.md'):
+            if part.endswith('.md') or part.endswith('.ctx'):
                 file_idx = idx
                 break
 
