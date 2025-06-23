@@ -54,7 +54,8 @@ WORKDIR /fractalic
 
 # Create necessary directories and set ownership
 RUN mkdir -p /fractalic/logs /fractalic/user-scripts /fractalic/user-config && \
-    chown -R appuser:appuser /fractalic /fractalic-ui
+    chown -R appuser:appuser /fractalic /fractalic-ui && \
+    chmod -R 755 /fractalic/logs
 
 # Copy Supervisor configuration
 COPY fractalic/docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
@@ -62,11 +63,11 @@ COPY fractalic/docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 # Set PYTHONPATH environment variable to fractalic directory
 ENV PYTHONPATH=/fractalic
 
-# Switch to the non-root user
-USER appuser
+# Set working directory
+WORKDIR /fractalic
 
 # Expose the necessary ports (matches local logic)
 EXPOSE 8000 3000 8001 8002 8003 8004 5859
 
-# Start Supervisor (matches local logic)
+# Start Supervisor as root (it will manage user switching for individual processes)
 CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
