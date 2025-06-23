@@ -16,39 +16,28 @@ Fractalic combines Markdown and YAML to create agentic AI systems using straight
 
 ## 🚀 One-Click Cloud Deploy
 
-Deploy Fractalic instantly to the cloud with real working buttons:
+Deploy Fractalic instantly to the cloud using our pre-built Docker container:
 
 ### ⚡ Railway (Recommended - Free & Instant)
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/dTvuQE?referralCode=fractalic)
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/docker)
 
 *🎯 **2-3 minutes** → Live app with custom URL*
 
-### 🎨 Render (Free Tier Available)
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/fractalic-ai/fractalic)
+### 🎨 Render (Free Tier Available)  
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
 
 *🎯 **3-5 minutes** → Auto HTTPS + Custom domain*
 
-### 🚀 Replit (Instant Development)
-[![Run on Replit](https://replit.com/badge/github/fractalic-ai/fractalic)](https://replit.com/new/github/fractalic-ai/fractalic)
-
-*🎯 **30 seconds** → Instant coding environment*
-
-### 💜 Heroku (Classic Cloud Platform)
-[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/fractalic-ai/fractalic)
-
-*🎯 **3-4 minutes** → Reliable cloud hosting*
-
 ### 🌊 DigitalOcean App Platform
-[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/fractalic-ai/fractalic&refcode=fractalic)
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new)
 
 *🎯 **5 minutes** → Production-ready scaling*
 
----
-
-### 🐳 Local Development
+### 🐳 Docker Registry
 ```bash
-# Quick local setup
-curl -s https://raw.githubusercontent.com/fractalic-ai/fractalic/main/deploy/docker-deploy.sh | bash
+# Pull and run anywhere Docker is supported
+docker run -p 3000:3000 -p 8000:8000 -p 8001:8001 ghcr.io/fractalic-ai/fractalic:main
+```
 ```
 
 **Access after deployment:**
@@ -105,8 +94,61 @@ Whatch this video with quick project overview and 101 concepts how to use it (pi
 - [ ] **System Context Direct Setting:** Enable direct system context adjustments at runtime.
 - [ ] **And Many More...**
 
-# Installation (Docker)
-## Requirements
+# Installation
+
+## 🐳 Quick Start with Docker (Recommended)
+
+### Option 1: Pre-built Container (Fastest)
+```bash
+# Pull and run from GitHub Container Registry
+docker run -d --name fractalic \
+  -p 3000:3000 -p 8000:8000 -p 8001:8001 \
+  ghcr.io/fractalic-ai/fractalic:main
+```
+
+### Option 2: Build Locally (Development)
+```bash
+# Clone and build locally
+curl -s https://raw.githubusercontent.com/fractalic-ai/fractalic/main/docker_build_run.sh | bash
+```
+
+### 🔧 With Your Own Configuration
+```bash
+# Create config directory
+mkdir -p fractalic-config
+
+# Add your config files (copy from .sample files)
+cp settings.toml.sample fractalic-config/settings.toml
+cp mcp_servers.json.sample fractalic-config/mcp_servers.json
+
+# Edit with your API keys and settings
+nano fractalic-config/settings.toml
+
+# Run with your config
+docker run -d --name fractalic \
+  -p 3000:3000 -p 8000:8000 -p 8001:8001 \
+  -v $(pwd)/fractalic-config:/app \
+  ghcr.io/fractalic-ai/fractalic:main
+```
+
+### 🌍 With Environment Variables
+```bash
+# Run with API keys as environment variables
+docker run -d --name fractalic \
+  -p 3000:3000 -p 8000:8000 -p 8001:8001 \
+  -e OPENAI_API_KEY=sk-your-openai-key \
+  -e ANTHROPIC_API_KEY=sk-ant-your-anthropic-key \
+  ghcr.io/fractalic-ai/fractalic:main
+```
+
+**Access the application:**
+- 🎨 **Frontend UI**: http://localhost:3000  
+- 🔧 **Backend API**: http://localhost:8000
+- 🤖 **AI Server**: http://localhost:8001
+
+---
+
+## Requirements for Local Development
 Important: please ensure you have Git installed on your system.
 Git dependecy would be removed in future releases. Sessions would be stored on .zip or .tar.gz files.
 
@@ -116,12 +158,6 @@ Fractalic is split into two repositories: `fractalic` and [`fractalic-ui`](https
 The backend will be launched on port 8000 and the frontend on port 3000.
 
 Currently, the recommended way to use Fractalic is to install both the interpreter with backend server and UI frontend, and run it as a Docker container. If you don't need Docker, you can skip that step and follow the local installation instructions.
-
-## Quick Install (Docker build + run)
-```bash
-curl -s https://raw.githubusercontent.com/fractalic-ai/fractalic/main/docker_build_run.sh | bash
-```
-Now UI should be available on http://localhost:3000 and backend on http://localhost:8000, on the first run it can take a while to launch the UI (takes about 10 seconds of blank screen). Please be aware to connect local folder with .md files and settings.toml to persist changes
 
 
 # Installation (Local)
