@@ -23,23 +23,18 @@ RUN useradd -m appuser
 WORKDIR /app
 
 # Copy and install backend dependencies
-COPY fractalic/requirements.txt /app/fractalic/requirements.txt
-RUN pip install --no-cache-dir -r /app/fractalic/requirements.txt
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy and install frontend dependencies (with fallback)
-COPY fractalic-ui/package*.json /app/fractalic-ui/
-RUN mkdir -p /app/fractalic-ui && \
-    cd /app/fractalic-ui && \
-    npm config set registry https://registry.npmjs.org/ && \
-    npm config set fetch-retry-mintimeout 20000 && \
-    npm config set fetch-retry-maxtimeout 120000 && \
-    npm config set fetch-retries 5 && \
-    (npm install --network-timeout=300000 || \
-     echo "npm install failed - will try to run with existing node_modules or minimal setup")
-
-# Copy the rest of the backend and frontend code
-COPY fractalic/ /app/fractalic/
-COPY fractalic-ui/ /app/fractalic-ui/
+# Copy the backend code and related files
+COPY fractalic.py /app/
+COPY fractalic_mcp_manager.py /app/
+COPY core/ /app/core/
+COPY ai_server/ /app/ai_server/
+COPY publisher/ /app/publisher/
+COPY settings.toml /app/
+COPY mcp_servers.json /app/
+COPY *.py /app/
 
 # Create a logs directory and set ownership
 RUN mkdir -p /app/logs && chown -R appuser:appuser /app/logs
