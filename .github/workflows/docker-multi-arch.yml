@@ -20,10 +20,45 @@ jobs:
       packages: write
 
     steps:
-    - name: Checkout repository
+    - name: Checkout Fractalic repository
       uses: actions/checkout@v4
       with:
+        path: fractalic
         submodules: recursive
+
+    - name: Checkout Fractalic-UI repository
+      uses: actions/checkout@v4
+      with:
+        repository: fractalic-ai/fractalic-ui
+        path: fractalic-ui
+        token: ${{ secrets.GITHUB_TOKEN }}
+      continue-on-error: true
+
+    - name: Create build context structure
+      run: |
+        echo "Setting up build context to match local deployment structure..."
+        echo "=== Workspace Structure ==="
+        ls -la
+        echo ""
+        echo "=== Fractalic Directory ==="
+        ls -la fractalic/ | head -10
+        echo ""
+        if [ -d "fractalic-ui" ] && [ -f "fractalic-ui/package.json" ]; then
+          echo "✅ Fractalic-UI directory found with package.json:"
+          ls -la fractalic-ui/ | head -10
+          echo "Package.json exists: $(ls -la fractalic-ui/package.json)"
+        else
+          echo "❌ Fractalic-UI directory not found or invalid, build will fail!"
+          echo "This is expected to be a fatal error for production builds."
+          echo "Available directories:"
+          ls -la
+          exit 1
+        fi
+        echo ""
+        echo "=== Docker Files ==="
+        ls -la fractalic/docker/
+        echo ""
+        echo "Build context is ready - both fractalic/ and fractalic-ui/ are siblings"
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -51,7 +86,7 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./docker/Dockerfile.production
+        file: ./fractalic/docker/Dockerfile.production
         platforms: linux/amd64,linux/arm64
         push: ${{ github.event_name != 'pull_request' }}
         tags: ${{ steps.meta.outputs.tags }}

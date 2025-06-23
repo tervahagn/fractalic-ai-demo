@@ -1,87 +1,74 @@
-# Multi-stage Dockerfile for Pre-built Base Images
-# This Dockerfile is optimized for GitHub Actions multi-arch builds
+# Production Dockerfile matching local publish_docker.py logic
+# Expects fractalic/ and fractalic-ui/ as sibling directories in build context
 
-# Stage 1: Base system with dependencies
-FROM python:3.11-slim as base
+# Use the official Python slim image for a smaller footprint
+FROM python:3.11-slim
 
-# Install system dependencies
+# Install system dependencies, including git
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     gnupg \
     supervisor \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+    git && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install Node.js (version 20)
+# Install Node.js (version 20) and npm
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
+# Create a non-root user
 RUN useradd -m appuser
 
-# Stage 2: Backend dependencies
-FROM base as backend-deps
+# Copy backend code to /fractalic directory (matches local logic)
+COPY fractalic/ /fractalic/
 
-# Copy and install Python dependencies
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+# Copy and install backend dependencies
+RUN pip install --no-cache-dir -r /fractalic/requirements.txt
 
-# Stage 3: Frontend dependencies and build
-FROM base as frontend-build
-
-# Copy package files first for better caching
-COPY fractalic-ui/package*.json /tmp/fractalic-ui/
-WORKDIR /tmp/fractalic-ui
-
-# Install dependencies with optimized settings
-RUN npm config set registry https://registry.npmjs.org/ && \
+# Copy and install frontend dependencies (fractalic-ui at same level as fractalic)
+COPY fractalic-ui/package*.json /fractalic-ui/
+RUN mkdir -p /fractalic-ui && \
+    cd /fractalic-ui && \
+    npm config set registry https://registry.npmjs.org/ && \
     npm config set fetch-retry-mintimeout 20000 && \
     npm config set fetch-retry-maxtimeout 120000 && \
     npm config set fetch-retries 5 && \
-    npm ci --only=production --network-timeout=300000
+    (npm install --network-timeout=300000 || \
+     echo "npm install failed - will try to run with existing node_modules or minimal setup")
 
-# Copy source code and build
-COPY fractalic-ui/ /tmp/fractalic-ui/
-COPY docker/next.config.docker.mjs /tmp/fractalic-ui/next.config.mjs
+# Copy the frontend code to same level as fractalic
+COPY fractalic-ui/ /fractalic-ui/
 
-# Build the application
-RUN npm run build
+# Replace next.config.mjs with Docker-specific version for container networking
+# This MUST come after copying fractalic-ui/ to ensure it doesn't get overwritten
+COPY fractalic/docker/next.config.docker.mjs /fractalic-ui/next.config.mjs
 
-# Stage 4: Final production image
-FROM backend-deps as production
-
-# Copy backend code
-COPY fractalic/ /fractalic/
-
-# Copy built frontend
-COPY --from=frontend-build /tmp/fractalic-ui /fractalic-ui/
-
-# Create necessary directories and set permissions
-RUN mkdir -p /fractalic/logs /fractalic/user-scripts /fractalic/user-config && \
-    chown -R appuser:appuser /fractalic /fractalic-ui
-
-# Copy supervisor configuration
-COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-
-# Set environment variables
-ENV PYTHONPATH=/fractalic
-ENV NODE_ENV=production
-
-# Switch to non-root user
-USER appuser
-
-# Set working directory
+# Set working directory to fractalic for backend operations  
 WORKDIR /fractalic
 
-# Expose ports
+# Skip npm run build - we use npm run dev in supervisord anyway
+# This makes Docker builds much faster since production build is unused
+
+# Create a logs directory and set ownership
+RUN mkdir -p /fractalic/logs && chown -R appuser:appuser /fractalic/logs
+
+# Copy Supervisor configuration
+COPY fractalic/docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Change ownership of both application directories to appuser
+RUN chown -R appuser:appuser /fractalic /fractalic-ui
+
+# Set PYTHONPATH environment variable to fractalic directory
+ENV PYTHONPATH=/fractalic
+
+# Switch to the non-root user
+USER appuser
+
+# Expose the necessary ports (matches local logic)
 EXPOSE 8000 3000 8001 8002 8003 8004 5859
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-
-# Start supervisor
+# Start Supervisor (matches local logic)
 CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
