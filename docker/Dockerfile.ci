@@ -45,7 +45,8 @@ COPY fractalic/core/ /app/core/
 COPY fractalic/ai_server/ /app/ai_server/
 COPY fractalic/publisher/ /app/publisher/
 COPY fractalic/settings.toml /app/
-COPY fractalic/mcp_servers.json /app/
+# Copy mcp_servers.json if it exists (optional for CI builds)
+COPY fractalic/mcp_servers.json* /app/
 COPY fractalic/*.py /app/
 
 # Copy the frontend code

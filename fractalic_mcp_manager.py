@@ -1454,7 +1454,17 @@ exec {full_command} 2>> "$LOG_FILE"
 # ==================================================================== Supervisor
 class Supervisor:
     def __init__(self, file: Path = CONF_PATH):
-        cfg = json.loads(file.read_text())
+        try:
+            if file.exists():
+                cfg = json.loads(file.read_text())
+            else:
+                # Use default empty config if file doesn't exist
+                log(f"Config file {file} not found, using default empty configuration")
+                cfg = {"mcpServers": {}}
+        except Exception as e:
+            log(f"Error reading config file {file}: {e}, using default empty configuration")
+            cfg = {"mcpServers": {}}
+        
         self.children = {n: Child(n, spec) for n, spec in cfg["mcpServers"].items()}
 
     async def start(self, tgt):
@@ -1695,7 +1705,11 @@ async def _add_server(req, sup: Supervisor):
         
         # Read current configuration
         try:
-            current_config = json.loads(CONF_PATH.read_text())
+            if CONF_PATH.exists():
+                current_config = json.loads(CONF_PATH.read_text())
+            else:
+                # Create default config if file doesn't exist
+                current_config = {"mcpServers": {}}
         except Exception as e:
             return web.json_response(
                 {"success": False, "error": f"Fractalic MCP manager: Failed to read server configuration: {str(e)}"}, 
@@ -1835,7 +1849,11 @@ async def _delete_server(req, sup: Supervisor):
         
         # Read current configuration
         try:
-            current_config = json.loads(CONF_PATH.read_text())
+            if CONF_PATH.exists():
+                current_config = json.loads(CONF_PATH.read_text())
+            else:
+                # Create default config if file doesn't exist
+                current_config = {"mcpServers": {}}
         except Exception as e:
             return web.json_response(
                 {"success": False, "error": f"Fractalic MCP manager: Failed to read server configuration: {str(e)}"}, 

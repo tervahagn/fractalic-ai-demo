@@ -1,6 +1,6 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+dockerfilePath = "docker/Dockerfile"
 
 [deploy]
 startCommand = "supervisord -c /etc/supervisor/conf.d/supervisord.conf"

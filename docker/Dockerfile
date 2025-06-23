@@ -33,7 +33,8 @@ COPY core/ /app/core/
 COPY ai_server/ /app/ai_server/
 COPY publisher/ /app/publisher/
 COPY settings.toml /app/
-COPY mcp_servers.json /app/
+# Copy mcp_servers.json if it exists (optional for local builds)
+COPY mcp_servers.json* /app/
 COPY *.py /app/
 
 # Create a logs directory and set ownership
