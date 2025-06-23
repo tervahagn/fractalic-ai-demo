@@ -1,21 +1,70 @@
 #!/bin/bash
 
-echo "Setting up Fractalic..."
+# Fractalic Docker Build & Run Script
+# This script is designed for fresh GitHub installations via:
+# curl -s https://raw.githubusercontent.com/fractalic-ai/fractalic/main/docker_build_run.sh | bash
+#
+# It will clone both fractalic and fractalic-ui repositories and build/run them in Docker.
+# For deploying existing local installations with custom content, use publish_docker.py instead.
 
-# 1. Clone repositories if they don't exist
+echo "Setting up Fractalic from GitHub..."
+
+# Safety check: Ensure we're in an empty or nearly empty directory
+# This prevents accidentally polluting existing projects
+CURRENT_FILES=$(ls -la | wc -l)
+if [ $CURRENT_FILES -gt 3 ]; then  # . .. and maybe one other file
+    echo "❌ ERROR: This directory is not empty!"
+    echo "This script is designed for fresh installations in empty directories."
+    echo ""
+    echo "Current directory contents:"
+    ls -la
+    echo ""
+    echo "If you want to deploy an existing Fractalic installation with custom content,"
+    echo "use the publish_docker.py script instead:"
+    echo "  python publish_docker.py --help"
+    echo ""
+    echo "If you want to continue anyway, create a new empty directory and run this script there."
+    exit 1
+fi
+
+echo "✅ Directory is suitable for fresh installation"
+
+# 1. Clone fractalic repository
+echo "Cloning fractalic repository..."
 git clone https://github.com/fractalic-ai/fractalic.git
+cd fractalic
+
+# 2. Clone fractalic-ui repository  
+echo "Cloning fractalic-ui repository..."
+cd ..
 git clone https://github.com/fractalic-ai/fractalic-ui.git
 
-# 2. Copy Docker files
-cd fractalic
-cp -a docker/. ..
-cd ..
+# 3. Create temporary build directory
+BUILD_DIR=$(mktemp -d -t fractalic-build-XXXXXX)
+echo "Created temporary build directory: $BUILD_DIR"
 
-# 3. Build Docker image
+# 4. Copy source repos to build directory
+echo "Copying source repositories to build directory..."
+cp -r fractalic "$BUILD_DIR/"
+cp -r fractalic-ui "$BUILD_DIR/"
+
+# 5. Copy Docker files to build directory
+echo "Setting up Docker build context..."
+cp -a fractalic/docker/. "$BUILD_DIR/"
+
+# 6. Build Docker image from temporary directory
 echo "Building Docker image..."
+cd "$BUILD_DIR"
 docker build -t fractalic-app .
 
-# 4. Check if container already exists and remove it
+# 7. Return to original directory and cleanup
+ORIGINAL_DIR="$PWD"
+cd - > /dev/null
+echo "Cleaning up temporary build directory..."
+rm -rf "$BUILD_DIR"
+cd fractalic  # Move into fractalic directory for container management
+
+# 7. Check if container already exists and remove it
 if [ "$(docker ps -qa -f name=fractalic-app)" ]; then
   echo "Removing existing container..."
   docker stop fractalic-app >/dev/null 2>&1

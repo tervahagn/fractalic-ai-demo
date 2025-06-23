@@ -2,20 +2,35 @@
 """
 Fractalic Docker Publisher
 
-This script creates a clean Docker deployment from the current working Fractalic repository.
-It copies the current state to a temporary build directory and creates a Docker container
-without polluting the main development repository.
+This script is for EXISTING Fractalic installations (not fresh GitHub installs).
+It creates a clean Docker deployment from your current working Fractalic repository,
+including any custom tutorials, scripts, or content you've created.
+
+For fresh GitHub installations, use docker_build_run.sh instead.
 
 Usage:
-    python publish_docker.py [--name container-name] [--port-offset 0]
+    python publish_docker.py [--name container-name] [--port-offset 0] [--include-path path/to/custom/content]
 
 Features:
-- Creates temporary build directory
-- Copies current fractalic repo state
-- Automatically detects and includes adjacent fractalic-ui if present
-- Builds and runs Docker container
-- Cleans up temporary files
+- Creates temporary build directory (never pollutes your source repo)
+- Copies current fractalic repo state with all your custom content
+- Automatically detects and includes adjacent fractalic-ui (expects ../fractalic-ui)
+- Optionally includes additional custom directories/files at the same level as fractalic
+- Builds and runs Docker container with proper networking
+- Cleans up temporary files automatically
 - Supports custom container naming and port mapping
+
+Expected Directory Structure:
+    your-workspace/
+    ├── fractalic/          (this repo with your custom content)
+    ├── fractalic-ui/       (UI repo, automatically detected)
+    └── my-custom-scripts/  (optional, can be included with --include-path)
+
+The resulting Docker container will have:
+    /app/
+    ├── fractalic/          (your fractalic installation)
+    ├── fractalic-ui/       (UI components)  
+    └── my-custom-scripts/  (if --include-path was used)
 """
 
 import os
@@ -72,12 +87,12 @@ class FractalicDockerPublisher:
         """Find fractalic-ui repository relative to current fractalic repo"""
         # Check common locations relative to current directory
         possible_paths = [
-            self.current_dir.parent / "fractalic-ui" / "my-app",  # ../fractalic-ui/my-app
-            self.current_dir.parent / "fractalic-ui",             # ../fractalic-ui
-            self.current_dir / "fractalic-ui" / "my-app",         # ./fractalic-ui/my-app
+            self.current_dir.parent / "fractalic-ui",             # ../fractalic-ui (new structure)
             self.current_dir / "fractalic-ui",                    # ./fractalic-ui
-            Path.cwd().parent / "fractalic-ui" / "my-app",        # ../fractalic-ui/my-app from cwd
             Path.cwd().parent / "fractalic-ui",                   # ../fractalic-ui from cwd
+            self.current_dir.parent / "fractalic-ui" / "my-app",  # ../fractalic-ui/my-app (legacy)
+            self.current_dir / "fractalic-ui" / "my-app",         # ./fractalic-ui/my-app (legacy)
+            Path.cwd().parent / "fractalic-ui" / "my-app",        # ../fractalic-ui/my-app from cwd (legacy)
         ]
         
         for path in possible_paths:
@@ -97,11 +112,23 @@ class FractalicDockerPublisher:
         """Create temporary build directory"""
         self.temp_dir = Path(tempfile.mkdtemp(prefix="fractalic_publish_"))
         self.log(f"Created temporary build directory: {self.temp_dir}")
+        
+        # CRITICAL: Ensure temp directory is NOT inside the main repo
+        # This prevents accidentally polluting the source repository
+        if self.current_dir in self.temp_dir.parents or self.temp_dir == self.current_dir:
+            raise RuntimeError(f"FATAL: Temporary directory {self.temp_dir} is inside source repo {self.current_dir}! This would pollute the source.")
+        
         return self.temp_dir
         
     def copy_fractalic_repo(self, build_dir):
         """Copy current fractalic repository to build directory"""
         fractalic_dest = build_dir / "fractalic"
+        
+        # CRITICAL SAFETY CHECK: Ensure we're not copying into our own repo
+        if fractalic_dest.resolve() == self.current_dir.resolve():
+            raise RuntimeError(f"FATAL: Attempting to copy repo into itself! Source: {self.current_dir}, Dest: {fractalic_dest}")
+        if self.current_dir in fractalic_dest.parents:
+            raise RuntimeError(f"FATAL: Destination {fractalic_dest} is inside source repo {self.current_dir}!")
         
         self.log("Copying fractalic repository...")
         
@@ -174,6 +201,12 @@ class FractalicDockerPublisher:
         if not ui_source:
             self.log("fractalic-ui is required but not found - cannot proceed", "ERROR")
             raise FileNotFoundError("fractalic-ui not found - this is a fatal error")
+        
+        # CRITICAL SAFETY CHECK: Ensure we're not copying into the main repo
+        if self.current_dir in ui_dest.parents:
+            raise RuntimeError(f"FATAL: UI destination {ui_dest} is inside source repo {self.current_dir}!")
+        if ui_dest.resolve() == self.current_dir.resolve():
+            raise RuntimeError(f"FATAL: Attempting to copy UI into main repo directory!")
             
         self.log("Copying fractalic-ui repository...")
         shutil.copytree(
@@ -753,8 +786,16 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
     def cleanup(self):
         """Clean up temporary files"""
         if self.temp_dir and self.temp_dir.exists():
-            self.log("Cleaning up temporary files...")
-            shutil.rmtree(self.temp_dir)
+            # SAFETY CHECK: Only delete if it's actually a temp directory
+            if "fractalic_publish_" in str(self.temp_dir) and "/tmp/" in str(self.temp_dir):
+                self.log(f"Cleaning up temporary files: {self.temp_dir}")
+                try:
+                    shutil.rmtree(self.temp_dir)
+                    self.log("Temporary files cleaned up successfully")
+                except Exception as e:
+                    self.log(f"Warning: Failed to clean up temp dir: {e}", "WARNING")
+            else:
+                self.log(f"WARNING: Skipping cleanup of suspicious directory: {self.temp_dir}", "WARNING")
             
     def publish(self):
         """Main publish process"""

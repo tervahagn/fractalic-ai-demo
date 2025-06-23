@@ -23,23 +23,24 @@ RUN useradd -m appuser
 WORKDIR /app
 
 # Copy and install backend dependencies
-COPY requirements.txt /app/requirements.txt
+COPY fractalic/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy the backend code and related files
-COPY fractalic.py /app/
-COPY fractalic_mcp_manager.py /app/
-COPY core/ /app/core/
-COPY ai_server/ /app/ai_server/
-COPY publisher/ /app/publisher/
+COPY fractalic/fractalic.py /app/
+COPY fractalic/fractalic_mcp_manager.py /app/
+COPY fractalic/core/ /app/core/
+COPY fractalic/ai_server/ /app/ai_server/
+COPY fractalic/publisher/ /app/publisher/
+COPY fractalic/tutorials/ /app/tutorials/
 # Copy settings.toml if it exists (optional for local builds without user keys)
-COPY settings.toml* /app/
+COPY fractalic/settings.toml* /app/
 # Copy mcp_servers.json if it exists (optional for local builds)
-COPY mcp_servers.json* /app/
-COPY *.py /app/
+COPY fractalic/mcp_servers.json* /app/
+COPY fractalic/*.py /app/
 
-# Copy and install frontend dependencies (assuming fractalic-ui is in parent directory)
-COPY ../fractalic-ui/package*.json /app/fractalic-ui/
+# Copy and install frontend dependencies (fractalic-ui is at same level as fractalic in build context)
+COPY fractalic-ui/package*.json /app/fractalic-ui/
 RUN mkdir -p /app/fractalic-ui && \
     cd /app/fractalic-ui && \
     npm config set registry https://registry.npmjs.org/ && \
@@ -50,10 +51,14 @@ RUN mkdir -p /app/fractalic-ui && \
      echo "npm install failed - will try to run with existing node_modules or minimal setup")
 
 # Copy the frontend code (files now directly in fractalic-ui root)
-COPY ../fractalic-ui/ /app/fractalic-ui/
+COPY fractalic-ui/ /app/fractalic-ui/
+
+# Replace next.config.mjs with Docker-specific version for container networking
+COPY next.config.docker.mjs /app/fractalic-ui/next.config.mjs
 
 # Build the frontend for production
 RUN cd /app/fractalic-ui && \
+    ls -la && \
     (npm run build || echo "Frontend build failed - will try to run in dev mode")
 
 # Create a logs directory and set ownership

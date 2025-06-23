@@ -1,6 +1,15 @@
 # fractalic: excluding settings.toml file
 settings.toml
 
+# Build artifacts and temporary directories
+# These should never be in the main repo - they belong in temp build directories
+/fractalic/
+/fractalic-ui/
+build/
+temp/
+tmp/
+.tmp/
+
 # macOS
 .DS_Store
 
