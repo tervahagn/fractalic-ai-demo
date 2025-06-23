@@ -72,12 +72,12 @@ USER appuser
 # Expose the necessary ports (matches local logic)
 EXPOSE 8000 3000 8001 8002 8003 8004 5859
 
-# Create an entrypoint script to ensure logs directory exists
+# Create an entrypoint script for proper initialization
 RUN echo '#!/bin/bash\n\
-mkdir -p /fractalic/logs\n\
-echo "Created logs directory, contents:"\n\
-ls -la /fractalic/logs\n\
-echo "Starting supervisord..."\n\
+echo "Starting Fractalic services..."\n\
+echo "Working directory: $(pwd)"\n\
+echo "User: $(whoami)"\n\
+echo "Logs will be in /tmp/"\n\
 exec supervisord -c /etc/supervisor/conf.d/supervisord.conf\n\
 ' > /fractalic/entrypoint.sh && chmod +x /fractalic/entrypoint.sh
 
