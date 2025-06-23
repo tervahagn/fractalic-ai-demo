@@ -24,7 +24,7 @@ class DockerRegistryPlugin(BasePlugin):
     
     def __init__(self):
         super().__init__()
-        self.default_registry = "ghcr.io/yourusername/fractalic"
+        self.default_registry = "ghcr.io/fractalic-ai/fractalic"
         self.default_ports = {
             "frontend": 3000,
             "backend": 8000,

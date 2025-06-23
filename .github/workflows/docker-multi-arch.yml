@@ -10,7 +10,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: fractalic
+  IMAGE_NAME: fractalic-ai/fractalic
 
 jobs:
   build-and-push:
@@ -101,7 +101,7 @@ jobs:
         echo "Testing AMD64 image..."
         docker run --rm --platform linux/amd64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest python --version
         
-        echo "Testing ARM64 image..."
+        echo "Testing ARM64 image..."  
         docker run --rm --platform linux/arm64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest python --version
 
   security-scan:

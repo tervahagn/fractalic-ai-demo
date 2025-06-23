@@ -52,14 +52,12 @@ WORKDIR /fractalic
 # Skip npm run build - we use npm run dev in supervisord anyway
 # This makes Docker builds much faster since production build is unused
 
-# Create a logs directory and set ownership
-RUN mkdir -p /fractalic/logs && chown -R appuser:appuser /fractalic/logs
-
 # Copy Supervisor configuration
 COPY fractalic/docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Change ownership of both application directories to appuser
-RUN chown -R appuser:appuser /fractalic /fractalic-ui
+# Create necessary directories and set ownership
+RUN mkdir -p /fractalic/logs /fractalic/user-scripts /fractalic/user-config && \
+    chown -R appuser:appuser /fractalic /fractalic-ui
 
 # Set PYTHONPATH environment variable to fractalic directory
 ENV PYTHONPATH=/fractalic
