@@ -14,28 +14,41 @@ Modern AI workflows shouldn’t be harder than they already are. We have powerfu
 
 Fractalic combines Markdown and YAML to create agentic AI systems using straightforward, human-readable documents. It lets you grow context step by step, control AI knowledge precisely, and orchestrate complex workflows through simple document structure and syntax.
 
-## 🚀 Quick Deploy
+## 🚀 One-Click Cloud Deploy
 
-Try Fractalic instantly with one-click deployment:
+Deploy Fractalic instantly to the cloud with real working buttons:
 
-### 🐳 Local Docker (Fastest)
-[![Deploy with Docker](https://img.shields.io/badge/Deploy-Docker%20Desktop-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://fractalic-ai.github.io/fractalic/deploy/)
+### ⚡ Railway (Recommended - Free & Instant)
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/dTvuQE?referralCode=fractalic)
 
+*🎯 **2-3 minutes** → Live app with custom URL*
+
+### 🎨 Render (Free Tier Available)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/fractalic-ai/fractalic)
+
+*🎯 **3-5 minutes** → Auto HTTPS + Custom domain*
+
+### 🚀 Replit (Instant Development)
+[![Run on Replit](https://replit.com/badge/github/fractalic-ai/fractalic)](https://replit.com/new/github/fractalic-ai/fractalic)
+
+*🎯 **30 seconds** → Instant coding environment*
+
+### 💜 Heroku (Classic Cloud Platform)
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/fractalic-ai/fractalic)
+
+*🎯 **3-4 minutes** → Reliable cloud hosting*
+
+### 🌊 DigitalOcean App Platform
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/fractalic-ai/fractalic&refcode=fractalic)
+
+*🎯 **5 minutes** → Production-ready scaling*
+
+---
+
+### 🐳 Local Development
 ```bash
+# Quick local setup
 curl -s https://raw.githubusercontent.com/fractalic-ai/fractalic/main/deploy/docker-deploy.sh | bash
-```
-
-### ☁️ GitHub Codespaces (No Installation)
-[![Open in GitHub Codespaces](https://img.shields.io/badge/Open%20in-Codespaces-24292f?style=for-the-badge&logo=github&logoColor=white)](https://codespaces.new/fractalic-ai/fractalic?quickstart=1)
-
-*Perfect for testing without local installation - runs entirely in the cloud!*
-
-### 🔧 Plugin-Based Deployment
-```bash
-# Clone and use our new publisher CLI
-git clone https://github.com/fractalic-ai/fractalic.git
-cd fractalic
-python publisher_cli.py deploy local_docker --name my-fractalic-app
 ```
 
 **Access after deployment:**

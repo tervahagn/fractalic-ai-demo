@@ -1,0 +1,26 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "supervisord -c /etc/supervisor/conf.d/supervisord.conf"
+healthcheckPath = "/"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[[services]]
+name = "fractalic-frontend"
+port = 3000
+
+[[services]]
+name = "fractalic-backend" 
+port = 8000
+
+[[services]]
+name = "fractalic-ai-server"
+port = 8001
+
+[env]
+NODE_ENV = "production"
+PYTHONPATH = "/app"

@@ -1,0 +1,19 @@
+name: fractalic
+services:
+- name: fractalic-app
+  source_dir: /
+  github:
+    repo: fractalic-ai/fractalic
+    branch: main
+  run_command: python fractalic.py
+  environment_slug: python
+  instance_count: 1
+  instance_size_slug: basic-xxs
+  http_port: 3000
+  env:
+  - key: NODE_ENV
+    value: "production"
+  - key: PYTHONPATH
+    value: "/app"
+  routes:
+  - path: /

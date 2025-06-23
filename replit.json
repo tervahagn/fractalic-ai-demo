@@ -1,0 +1,16 @@
+{
+  "name": "Fractalic - AI Programming Platform",
+  "description": "Program AI in plain language with Fractalic",
+  "image": "python:3.11",
+  "port": 3000,
+  "files": [
+    {
+      "name": ".replit",
+      "content": "run = \"python fractalic.py\"\nmodules = [\"python-3.11\", \"nodejs-18\", \"web\"]\n\n[nix]\nchannel = \"stable-22_11\"\n\n[deployment]\nrun = [\"sh\", \"-c\", \"python fractalic.py\"]\ndeploymentTarget = \"cloudrun\""
+    },
+    {
+      "name": "pyproject.toml", 
+      "content": "[build-system]\nrequires = [\"setuptools\", \"wheel\"]\nbuild-backend = \"setuptools.build_meta\"\n\n[project]\nname = \"fractalic\"\nversion = \"1.0.0\"\ndependencies = [\n  \"fastapi\",\n  \"uvicorn\",\n  \"pydantic\",\n  \"PyYAML\",\n  \"toml\",\n  \"openai\",\n  \"anthropic\"\n]"
+    }
+  ]
+}

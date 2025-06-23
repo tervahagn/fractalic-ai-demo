@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: fractalic
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+    scaling:
+      minInstances: 1
+      maxInstances: 1

@@ -1,0 +1,39 @@
+{
+  "name": "Fractalic - AI Programming Platform",
+  "description": "Program AI in plain language with Fractalic",
+  "image": "heroku/python",
+  "stack": "heroku-22",
+  "keywords": ["ai", "programming", "automation", "python", "javascript"],
+  "website": "https://github.com/fractalic-ai/fractalic",
+  "repository": "https://github.com/fractalic-ai/fractalic",
+  "logo": "https://raw.githubusercontent.com/fractalic-ai/fractalic/main/docs/images/fractalic_hero.png",
+  "success_url": "/",
+  "scripts": {
+    "postdeploy": "echo 'Fractalic deployed successfully!'"
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    },
+    {
+      "url": "heroku/nodejs"
+    }
+  ],
+  "env": {
+    "NODE_ENV": {
+      "description": "Node environment",
+      "value": "production"
+    },
+    "PYTHONPATH": {
+      "description": "Python path",
+      "value": "/app"
+    }
+  },
+  "addons": []
+}
