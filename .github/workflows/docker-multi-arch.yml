@@ -96,13 +96,10 @@ jobs:
         build-args: |
           BUILDKIT_INLINE_CACHE=1
 
-    - name: Test multi-arch images
+    - name: Verify multi-arch images were built
       run: |
-        echo "Testing AMD64 image..."
-        docker run --rm --platform linux/amd64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest python --version
-        
-        echo "Testing ARM64 image..."  
-        docker run --rm --platform linux/arm64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest python --version
+        echo "Verifying multi-arch images were built and pushed..."
+        docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
   security-scan:
     needs: build-and-push

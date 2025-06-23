@@ -1,47 +1,13 @@
 # Fractalic Settings Configuration
 # Copy this file to settings.toml and customize with your API keys and settings
 
-[llm]
-# OpenAI Configuration (uncomment and add your API key)
-# openai_api_key = "sk-your-openai-api-key-here"
+# Default LLM provider - set to your preferred model
+defaultProvider = ""
 
-# Claude/Anthropic Configuration (uncomment and add your API key)  
-# anthropic_api_key = "sk-ant-your-anthropic-api-key-here"
 
-# Azure OpenAI Configuration (uncomment and configure)
-# azure_openai_endpoint = "https://your-resource.openai.azure.com/"
-# azure_openai_api_key = "your-azure-api-key"
-# azure_openai_api_version = "2023-12-01-preview"
+[runtime]
+enableOperationsVisibility = true
 
-[server]
-# Server configuration
-host = "0.0.0.0"
-port = 8000
+[mcp]
+mcpServers = ["http://127.0.0.1:5859"]
 
-# UI server configuration  
-ui_host = "0.0.0.0"
-ui_port = 3000
-
-[ai_server]
-# AI server configuration
-host = "0.0.0.0" 
-port = 8001
-
-[logging]
-# Logging configuration
-level = "INFO"
-format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-[security]
-# Security settings (customize for production)
-# allowed_origins = ["http://localhost:3000", "https://yourdomain.com"]
-# cors_enabled = true
-
-# Example of environment-specific settings
-[development]
-debug = true
-auto_reload = true
-
-[production]  
-debug = false
-auto_reload = false
