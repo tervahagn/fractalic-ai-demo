@@ -38,6 +38,24 @@ COPY settings.toml* /app/
 COPY mcp_servers.json* /app/
 COPY *.py /app/
 
+# Copy and install frontend dependencies (assuming fractalic-ui is in parent directory)
+COPY ../fractalic-ui/package*.json /app/fractalic-ui/
+RUN mkdir -p /app/fractalic-ui && \
+    cd /app/fractalic-ui && \
+    npm config set registry https://registry.npmjs.org/ && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-retries 5 && \
+    (npm install --network-timeout=300000 || \
+     echo "npm install failed - will try to run with existing node_modules or minimal setup")
+
+# Copy the frontend code (files now directly in fractalic-ui root)
+COPY ../fractalic-ui/ /app/fractalic-ui/
+
+# Build the frontend for production
+RUN cd /app/fractalic-ui && \
+    (npm run build || echo "Frontend build failed - will try to run in dev mode")
+
 # Create a logs directory and set ownership
 RUN mkdir -p /app/logs && chown -R appuser:appuser /app/logs
 

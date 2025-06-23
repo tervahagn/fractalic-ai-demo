@@ -27,7 +27,7 @@ WORKDIR /app
 COPY fractalic/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy and install frontend dependencies
+# Copy and install frontend dependencies (files now directly in fractalic-ui root)
 COPY fractalic-ui/package*.json /app/fractalic-ui/
 RUN mkdir -p /app/fractalic-ui && \
     cd /app/fractalic-ui && \
@@ -50,8 +50,12 @@ COPY fractalic/settings.toml* /app/
 COPY fractalic/mcp_servers.json* /app/
 COPY fractalic/*.py /app/
 
-# Copy the frontend code
+# Copy the frontend code (now files are directly in fractalic-ui root, not in my-app subfolder)
 COPY fractalic-ui/ /app/fractalic-ui/
+
+# Build the frontend for production
+RUN cd /app/fractalic-ui && \
+    (npm run build || echo "Frontend build failed - will try to run in dev mode")
 
 # Create a logs directory and set ownership
 RUN mkdir -p /app/logs && chown -R appuser:appuser /app/logs
