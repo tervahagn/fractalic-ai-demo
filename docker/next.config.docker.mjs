@@ -1,54 +1,25 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  reactStrictMode: true, // Enable React strict mode for development
+  output: 'standalone',
+  trailingSlash: false,
+  
+  // Docker deployment: Direct API access via host-mapped ports
+  // No rewrites needed - frontend uses NEXT_PUBLIC_API_BASE_URL
+  
   async rewrites() {
-    // Use environment variable for backend URL, default to localhost for Docker
-    const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
-    
+    return [];
+  },
+  
+  async headers() {
     return [
       {
-        source: '/list_directory',
-        destination: `${backendUrl}/list_directory`,
-      },
-      {
-        source: '/branches_and_commits',
-        destination: `${backendUrl}/branches_and_commits`,
-      },
-      {
-        source: '/get_file_content_disk',
-        destination: `${backendUrl}/get_file_content_disk`,
-      },
-      {
-        source: '/create_file',
-        destination: `${backendUrl}/create_file`,
-      },
-      {
-        source: '/create_folder',
-        destination: `${backendUrl}/create_folder`,
-      },
-      {
-        source: '/get_file_content',
-        destination: `${backendUrl}/get_file_content`,
-      },
-      {
-        source: '/save_file',
-        destination: `${backendUrl}/save_file`,
-      },
-      {
-        source: '/delete_item',
-        destination: `${backendUrl}/delete_item`,
-      },
-      {
-        source: '/rename_item',
-        destination: `${backendUrl}/rename_item`,
-      },
-      {
-        source: '/load_settings',
-        destination: `${backendUrl}/load_settings`,
-      },
-      {
-        source: '/save_settings',
-        destination: `${backendUrl}/save_settings`,
+        source: '/:path*',
+        headers: [
+          {
+            key: 'X-Content-Type-Options',
+            value: 'nosniff',
+          },
+        ],
       },
     ];
   },

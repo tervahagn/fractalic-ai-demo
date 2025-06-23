@@ -19,30 +19,16 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 # Create a non-root user
 RUN useradd -m appuser
 
-# Set the working directory
-WORKDIR /app
+# Copy backend code to /fractalic directory
+COPY fractalic/ /fractalic/
 
 # Copy and install backend dependencies
-COPY fractalic/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir -r /fractalic/requirements.txt
 
-# Copy the backend code and related files
-COPY fractalic/fractalic.py /app/
-COPY fractalic/fractalic_mcp_manager.py /app/
-COPY fractalic/core/ /app/core/
-COPY fractalic/ai_server/ /app/ai_server/
-COPY fractalic/publisher/ /app/publisher/
-COPY fractalic/tutorials/ /app/tutorials/
-# Copy settings.toml if it exists (optional for local builds without user keys)
-COPY fractalic/settings.toml* /app/
-# Copy mcp_servers.json if it exists (optional for local builds)
-COPY fractalic/mcp_servers.json* /app/
-COPY fractalic/*.py /app/
-
-# Copy and install frontend dependencies (fractalic-ui is at same level as fractalic in build context)
-COPY fractalic-ui/package*.json /app/fractalic-ui/
-RUN mkdir -p /app/fractalic-ui && \
-    cd /app/fractalic-ui && \
+# Copy and install frontend dependencies (fractalic-ui at same level as fractalic)
+COPY fractalic-ui/package*.json /fractalic-ui/
+RUN mkdir -p /fractalic-ui && \
+    cd /fractalic-ui && \
     npm config set registry https://registry.npmjs.org/ && \
     npm config set fetch-retry-mintimeout 20000 && \
     npm config set fetch-retry-maxtimeout 120000 && \
@@ -50,26 +36,30 @@ RUN mkdir -p /app/fractalic-ui && \
     (npm install --network-timeout=300000 || \
      echo "npm install failed - will try to run with existing node_modules or minimal setup")
 
-# Copy the frontend code (files now directly in fractalic-ui root)
-COPY fractalic-ui/ /app/fractalic-ui/
+# Copy the frontend code to same level as fractalic
+COPY fractalic-ui/ /fractalic-ui/
 
 # Replace next.config.mjs with Docker-specific version for container networking
-COPY next.config.docker.mjs /app/fractalic-ui/next.config.mjs
+# This MUST come after copying fractalic-ui/ to ensure it doesn't get overwritten
+COPY next.config.docker.mjs /fractalic-ui/next.config.mjs
+
+# Set working directory to fractalic for backend operations
+WORKDIR /fractalic
 
 # Skip npm run build - we use npm run dev in supervisord anyway
 # This makes Docker builds much faster since production build is unused
 
 # Create a logs directory and set ownership
-RUN mkdir -p /app/logs && chown -R appuser:appuser /app/logs
+RUN mkdir -p /fractalic/logs && chown -R appuser:appuser /fractalic/logs
 
 # Copy Supervisor configuration
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Change ownership of the application directory to appuser
-RUN chown -R appuser:appuser /app
+# Change ownership of both application directories to appuser
+RUN chown -R appuser:appuser /fractalic /fractalic-ui
 
-# Set PYTHONPATH environment variable
-ENV PYTHONPATH=/app
+# Set PYTHONPATH environment variable to fractalic directory
+ENV PYTHONPATH=/fractalic
 
 # Switch to the non-root user
 USER appuser

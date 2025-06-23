@@ -71,7 +71,19 @@ class FractalicDockerPublisher:
     def log(self, message, level="INFO"):
         """Log message with timestamp"""
         timestamp = time.strftime("%H:%M:%S")
-        print(f"[{timestamp}] {level}: {message}")
+        prefix = {
+            "INFO": "ℹ️ ",
+            "SUCCESS": "✅ ",
+            "WARNING": "⚠️ ",
+            "ERROR": "❌ ",
+            "BUILD": "🏗️ ",
+            "STEP": "📋 "
+        }.get(level, "ℹ️ ")
+        print(f"[{timestamp}] {prefix}{message}")
+        
+    def log_step(self, step_num, total_steps, description):
+        """Log a build step with progress"""
+        self.log(f"Step {step_num}/{total_steps}: {description}", "STEP")
         
     def check_dependencies(self):
         """Check if Docker is available"""
@@ -111,7 +123,7 @@ class FractalicDockerPublisher:
     def create_temp_build_dir(self):
         """Create temporary build directory"""
         self.temp_dir = Path(tempfile.mkdtemp(prefix="fractalic_publish_"))
-        self.log(f"Created temporary build directory: {self.temp_dir}")
+        self.log(f"Created temporary build directory: {self.temp_dir}", "SUCCESS")
         
         # CRITICAL: Ensure temp directory is NOT inside the main repo
         # This prevents accidentally polluting the source repository
@@ -119,6 +131,16 @@ class FractalicDockerPublisher:
             raise RuntimeError(f"FATAL: Temporary directory {self.temp_dir} is inside source repo {self.current_dir}! This would pollute the source.")
         
         return self.temp_dir
+        
+    def get_directory_size(self, path):
+        """Get directory size in MB"""
+        total_size = 0
+        for dirpath, dirnames, filenames in os.walk(path):
+            for filename in filenames:
+                filepath = os.path.join(dirpath, filename)
+                if os.path.exists(filepath):
+                    total_size += os.path.getsize(filepath)
+        return total_size / (1024 * 1024)  # Convert to MB
         
     def copy_fractalic_repo(self, build_dir):
         """Copy current fractalic repository to build directory"""
@@ -130,7 +152,7 @@ class FractalicDockerPublisher:
         if self.current_dir in fractalic_dest.parents:
             raise RuntimeError(f"FATAL: Destination {fractalic_dest} is inside source repo {self.current_dir}!")
         
-        self.log("Copying fractalic repository...")
+        self.log("Copying fractalic repository...", "BUILD")
         
         # Copy the entire fractalic directory but exclude some development files
         exclude_patterns = {
@@ -139,11 +161,17 @@ class FractalicDockerPublisher:
             '*.log', 'logs/*', '.vscode', '.idea'
         }
         
+        start_time = time.time()
         shutil.copytree(
             self.current_dir, 
             fractalic_dest, 
             ignore=shutil.ignore_patterns(*exclude_patterns)
         )
+        copy_time = time.time() - start_time
+        
+        # Report size and timing
+        size_mb = self.get_directory_size(fractalic_dest)
+        self.log(f"Copied fractalic ({size_mb:.1f} MB) in {copy_time:.2f}s", "SUCCESS")
         
         # Ensure critical files are present
         critical_files = [
@@ -162,7 +190,7 @@ class FractalicDockerPublisher:
         # Fix MCP manager to bind to all interfaces for Docker deployment
         self.fix_mcp_manager_binding(fractalic_dest / "fractalic_mcp_manager.py")
             
-        self.log("Fractalic repository copied successfully")
+        self.log("Fractalic repository setup complete", "SUCCESS")
         return fractalic_dest
         
     def fix_mcp_manager_binding(self, mcp_manager_path):
@@ -208,13 +236,18 @@ class FractalicDockerPublisher:
         if ui_dest.resolve() == self.current_dir.resolve():
             raise RuntimeError(f"FATAL: Attempting to copy UI into main repo directory!")
             
-        self.log("Copying fractalic-ui repository...")
+        self.log("Copying fractalic-ui repository...", "BUILD")
+        start_time = time.time()
+        
         shutil.copytree(
             ui_source, 
             ui_dest,
-            ignore=shutil.ignore_patterns('node_modules', '.git', '.DS_Store', '__pycache__')
+            ignore=shutil.ignore_patterns('node_modules', '.git', '.DS_Store', '__pycache__', '.next', '*.tsbuildinfo')
         )
-        self.log("fractalic-ui copied successfully")
+        
+        copy_time = time.time() - start_time
+        size_mb = self.get_directory_size(ui_dest)
+        self.log(f"Copied fractalic-ui ({size_mb:.1f} MB) in {copy_time:.2f}s", "SUCCESS")
         
         # Verify package.json exists in destination
         if not (ui_dest / "package.json").exists():
@@ -665,9 +698,9 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
         docker_src = self.current_dir / "docker"
         docker_dest = build_dir
         
-        # Copy Dockerfile and supervisord.conf to build root
+        # Copy Dockerfile, supervisord.conf, and next.config.docker.mjs to build root
         if docker_src.exists():
-            for file in ["Dockerfile", "supervisord.conf"]:
+            for file in ["Dockerfile", "supervisord.conf", "next.config.docker.mjs"]:
                 src_file = docker_src / file
                 if src_file.exists():
                     shutil.copy2(src_file, docker_dest / file)
@@ -700,20 +733,70 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
         self.log("Fixed MCP manager command syntax")
             
     def build_docker_image(self, build_dir):
-        """Build Docker image"""
+        """Build Docker image with live output and progress tracking"""
         image_name = f"{self.container_name}:latest"
         
-        self.log(f"Building Docker image: {image_name}")
+        # Report build context size
+        total_size = self.get_directory_size(build_dir)
+        self.log(f"Build context size: {total_size:.1f} MB", "BUILD")
+        
+        self.log(f"Building Docker image: {image_name}", "BUILD")
+        
+        # Show what's in the build directory
+        self.log("Build directory contents:", "BUILD")
+        for item in build_dir.iterdir():
+            if item.is_dir():
+                size = self.get_directory_size(item)
+                self.log(f"  📁 {item.name}/ ({size:.1f} MB)")
+            else:
+                size = item.stat().st_size / 1024  # KB
+                self.log(f"  📄 {item.name} ({size:.1f} KB)")
+        
+        self.log("=== DOCKER BUILD OUTPUT ===", "BUILD")
         
         cmd = ["docker", "build", "-t", image_name, str(build_dir)]
+        start_time = time.time()
         
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Stream output in real-time with step tracking
+        process = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT, 
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
         
-        if result.returncode == 0:
-            self.log("Docker image built successfully")
+        step_count = 0
+        # Print output line by line as it comes
+        for line in process.stdout:
+            line = line.rstrip()
+            if "Step " in line and "/" in line:
+                step_count += 1
+                # Highlight Docker steps
+                self.log(f"🏗️  {line}", "BUILD")
+            elif "-->" in line or "sha256:" in line:
+                # Highlight important progress lines
+                print(f"    ✅ {line}")
+            elif "RUN " in line or "COPY " in line or "WORKDIR " in line:
+                # Highlight commands
+                print(f"    ⚡ {line}")
+            else:
+                # Regular output
+                print(f"    {line}")
+        
+        # Wait for process to complete
+        return_code = process.wait()
+        build_time = time.time() - start_time
+        
+        self.log("=== END DOCKER BUILD OUTPUT ===", "BUILD")
+        
+        if return_code == 0:
+            self.log(f"Docker image built successfully in {build_time:.1f}s", "SUCCESS")
+            self.log(f"Image: {image_name}", "SUCCESS")
             return image_name
         else:
-            self.log(f"Docker build failed: {result.stderr}", "ERROR")
+            self.log(f"Docker build failed with return code: {return_code}", "ERROR")
             return None
             
     def stop_existing_container(self):
@@ -732,54 +815,90 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
             subprocess.run(["docker", "rm", self.container_name], capture_output=True)
             
     def run_container(self, image_name):
-        """Run the Docker container"""
-        self.log(f"Starting container: {self.container_name}")
+        """Run the Docker container with detailed progress"""
+        self.log(f"Starting container: {self.container_name}", "BUILD")
         
         # Build port mapping arguments (host:container)
         port_args = []
+        self.log("Configuring port mappings:", "BUILD")
+        
         for service in self.host_ports.keys():
             host_port = self.host_ports[service]
             container_port = self.container_ports[service]
             port_args.extend(["-p", f"{host_port}:{container_port}"])
-            self.log(f"Port mapping: {service} -> {host_port}:{container_port}")
+            self.log(f"  {service}: localhost:{host_port} -> container:{container_port}")
                 
         # Also map additional AI server ports (8002, 8003, 8004)
+        self.log("  Additional AI server ports:")
         for i in range(2, 5):  # 8002, 8003, 8004
             host_ai_port = 8000 + i + self.port_offset
             container_ai_port = 8000 + i
             port_args.extend(["-p", f"{host_ai_port}:{container_ai_port}"])
+            self.log(f"    AI server {i}: localhost:{host_ai_port} -> container:{container_ai_port}")
         
         cmd = [
             "docker", "run", "-d",
             "--name", self.container_name
         ] + port_args + [image_name]
         
+        self.log("Executing: " + " ".join(cmd[:6]) + " ... " + image_name, "BUILD")
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode == 0:
-            self.log("Container started successfully")
+            container_id = result.stdout.strip()[:12]  # First 12 chars of container ID
+            self.log(f"Container started successfully (ID: {container_id})", "SUCCESS")
             return True
         else:
             self.log(f"Failed to start container: {result.stderr}", "ERROR")
             return False
             
     def wait_for_services(self):
-        """Wait for services to be ready"""
-        self.log("Waiting for services to start...")
-        time.sleep(10)
+        """Wait for services to be ready with progressive checking"""
+        self.log("Waiting for services to start...", "BUILD")
         
-        # Check service availability
+        # Give initial startup time
+        for i in range(10, 0, -1):
+            self.log(f"Initial startup wait: {i}s remaining...")
+            time.sleep(1)
+        
+        # Check service availability progressively
         services_status = {}
+        max_attempts = 3
         
-        for service in self.host_ports.keys():
-            host_port = self.host_ports[service]
-            try:
-                import urllib.request
-                url = f"http://localhost:{host_port}"
-                urllib.request.urlopen(url, timeout=5)
-                services_status[service] = "✅ Available"
-            except:
-                services_status[service] = "⚠️ Starting"
+        for attempt in range(1, max_attempts + 1):
+            self.log(f"Service check attempt {attempt}/{max_attempts}", "BUILD")
+            
+            for service in self.host_ports.keys():
+                if service in services_status and "✅" in services_status[service]:
+                    continue  # Skip already confirmed services
+                    
+                host_port = self.host_ports[service]
+                try:
+                    import urllib.request
+                    url = f"http://localhost:{host_port}"
+                    urllib.request.urlopen(url, timeout=3)
+                    services_status[service] = "✅ Available"
+                    self.log(f"   {service}: Available on port {host_port}", "SUCCESS")
+                except Exception as e:
+                    services_status[service] = f"⚠️ Starting (attempt {attempt})"
+                    self.log(f"   {service}: Not yet ready on port {host_port}")
+            
+            # Check if all services are ready
+            ready_count = sum(1 for status in services_status.values() if "✅" in status)
+            total_count = len(self.host_ports)
+            self.log(f"Services ready: {ready_count}/{total_count}")
+            
+            if ready_count == total_count:
+                break
+            
+            if attempt < max_attempts:
+                self.log("Waiting 5s before next check...")
+                time.sleep(5)
+        
+        # Final status for any remaining services
+        for service in services_status:
+            if "⚠️" in services_status[service]:
+                services_status[service] = "⚠️ May need more time"
                 
         return services_status
         
@@ -798,27 +917,47 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
                 self.log(f"WARNING: Skipping cleanup of suspicious directory: {self.temp_dir}", "WARNING")
             
     def publish(self):
-        """Main publish process"""
+        """Main publish process with step-by-step progress tracking"""
+        total_steps = 8
+        
         try:
-            # Check dependencies
+            self.log("🚀 Starting Fractalic Docker deployment", "BUILD")
+            self.log(f"Container: {self.container_name}", "BUILD")
+            self.log(f"Port offset: {self.port_offset}", "BUILD")
+            self.log("")
+            
+            # Step 1: Check dependencies
+            self.log_step(1, total_steps, "Checking Docker availability")
             if not self.check_dependencies():
                 return False
-                
-            # Create build directory
+            
+            # Step 2: Create build directory
+            self.log_step(2, total_steps, "Creating temporary build directory")
             build_dir = self.create_temp_build_dir()
             
-            # Copy source files
+            # Step 3: Copy source files
+            self.log_step(3, total_steps, "Copying Fractalic backend")
             self.copy_fractalic_repo(build_dir)
+            
+            self.log_step(4, total_steps, "Copying Fractalic UI frontend")
             self.copy_or_create_frontend(build_dir)
+            
+            self.log_step(5, total_steps, "Copying Docker configuration")
             self.copy_docker_config(build_dir)
             
-            # Build and run
+            # Step 6: Stop existing container
+            self.log_step(6, total_steps, "Stopping existing containers")
             self.stop_existing_container()
+            
+            # Step 7: Build Docker image
+            self.log_step(7, total_steps, "Building Docker image")
             image_name = self.build_docker_image(build_dir)
             
             if not image_name:
                 return False
-                
+            
+            # Step 8: Run container and verify services
+            self.log_step(8, total_steps, "Starting container and verifying services")
             if not self.run_container(image_name):
                 return False
                 
@@ -826,9 +965,10 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
             services_status = self.wait_for_services()
             
             # Report success
-            self.log("🎉 Publication completed successfully!")
             self.log("")
-            self.log("📋 Services Summary:")
+            self.log("🎉 Publication completed successfully!", "SUCCESS")
+            self.log("")
+            self.log("📋 Services Summary:", "SUCCESS")
             for service, status in services_status.items():
                 service_name = service.replace('_', ' ').title()
                 host_port = self.host_ports[service]
@@ -836,14 +976,16 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
                 self.log(f"   • {service_name}: http://localhost:{host_port} -> container:{container_port} - {status}")
                 
             self.log("")
-            self.log(f"Container name: {self.container_name}")
-            self.log("Use 'docker logs {self.container_name}' to view logs")
-            self.log("Use 'docker stop {self.container_name}' to stop")
+            self.log(f"Container name: {self.container_name}", "SUCCESS")
+            self.log(f"Use 'docker logs {self.container_name}' to view logs")
+            self.log(f"Use 'docker stop {self.container_name}' to stop")
             
             return True
             
         except Exception as e:
             self.log(f"Publication failed: {str(e)}", "ERROR")
+            import traceback
+            self.log(f"Error details: {traceback.format_exc()}", "ERROR")
             return False
         finally:
             self.cleanup()
