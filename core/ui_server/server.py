@@ -807,15 +807,6 @@ async def get_mcp_manager_status_route():
     return await get_mcp_manager_status()
 
 # ============================================================================
-# Application Lifecycle Management
-# ============================================================================
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up resources on application shutdown"""
-    await cleanup_mcp_manager()
-
-# ============================================================================
 # Health Check and Info Routes
 # ============================================================================
 
@@ -844,3 +835,176 @@ async def get_info():
         },
         "mcp_manager": mcp_status
     }
+
+# ============================================================================
+# Docker Registry Deployment API
+# ============================================================================
+
+# Store active deployments (in production, use a database)
+active_deployments: Dict[str, Dict[str, Any]] = {}
+
+@app.post("/api/deploy/docker-registry")
+async def deploy_docker_registry(request: Request):
+    """Deploy using Docker registry with pre-built images"""
+    try:
+        data = await request.json()
+        
+        # Import the plugin manager
+        from publisher.plugin_manager import PluginManager
+        from publisher.models import PublishRequest
+        
+        # Initialize plugin manager and get Docker registry plugin
+        plugin_manager = PluginManager()
+        docker_plugin = plugin_manager.get_plugin("docker-registry")
+        
+        if not docker_plugin:
+            raise HTTPException(status_code=500, detail="Docker registry plugin not available")
+        
+        # Create publish request
+        publish_request = PublishRequest(
+            config=data,
+            metadata={"requested_at": time.time()}
+        )
+        
+        # Execute deployment
+        response = docker_plugin.publish(publish_request)
+        
+        # Store deployment info
+        if response.success and response.deployment_id:
+            active_deployments[response.deployment_id] = {
+                "deployment_id": response.deployment_id,
+                "script_name": data.get("script_name", "unknown"),
+                "status": "running",
+                "created_at": time.time(),
+                "metadata": response.metadata or {}
+            }
+        
+        return {
+            "success": response.success,
+            "message": response.message,
+            "deployment_id": response.deployment_id,
+            "endpoint_url": response.endpoint_url,
+            "metadata": response.metadata
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")
+
+@app.get("/api/deploy/status/{deployment_id}")
+async def get_deployment_status(deployment_id: str):
+    """Get the status of a specific deployment"""
+    try:
+        from publisher.plugin_manager import PluginManager
+        
+        plugin_manager = PluginManager()
+        docker_plugin = plugin_manager.get_plugin("docker-registry")
+        
+        if not docker_plugin:
+            raise HTTPException(status_code=500, detail="Docker registry plugin not available")
+        
+        # Get status from plugin
+        status = docker_plugin.get_status(deployment_id)
+        
+        # Update stored deployment info
+        if deployment_id in active_deployments:
+            active_deployments[deployment_id]["status"] = status.status
+            active_deployments[deployment_id]["last_updated"] = time.time()
+        
+        return {
+            "deployment_id": status.deployment_id,
+            "status": status.status,
+            "is_healthy": status.is_healthy,
+            "last_updated": status.last_updated,
+            "stored_info": active_deployments.get(deployment_id, {})
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get status: {str(e)}")
+
+@app.get("/api/deploy/logs/{deployment_id}")
+async def get_deployment_logs(deployment_id: str, lines: int = Query(100, description="Number of log lines to return")):
+    """Get logs for a specific deployment"""
+    try:
+        import subprocess
+        
+        # Get container logs
+        result = subprocess.run([
+            "docker", "logs", "--tail", str(lines), deployment_id
+        ], capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            return {
+                "deployment_id": deployment_id,
+                "logs": result.stdout,
+                "error_logs": result.stderr
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Deployment not found or logs unavailable")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get logs: {str(e)}")
+
+@app.delete("/api/deploy/{deployment_id}")
+async def delete_deployment(deployment_id: str):
+    """Stop and remove a deployment"""
+    try:
+        from publisher.plugin_manager import PluginManager
+        
+        plugin_manager = PluginManager()
+        docker_plugin = plugin_manager.get_plugin("docker-registry")
+        
+        if not docker_plugin:
+            raise HTTPException(status_code=500, detail="Docker registry plugin not available")
+        
+        # Cleanup deployment
+        success = docker_plugin.cleanup(deployment_id)
+        
+        # Remove from active deployments
+        if deployment_id in active_deployments:
+            del active_deployments[deployment_id]
+        
+        return {
+            "success": success,
+            "message": "Deployment removed successfully" if success else "Failed to remove deployment"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete deployment: {str(e)}")
+
+@app.get("/api/deploy/list")
+async def list_deployments():
+    """List all active deployments"""
+    try:
+        # Update status for all deployments
+        from publisher.plugin_manager import PluginManager
+        
+        plugin_manager = PluginManager()
+        docker_plugin = plugin_manager.get_plugin("docker-registry")
+        
+        if docker_plugin:
+            for deployment_id in list(active_deployments.keys()):
+                try:
+                    status = docker_plugin.get_status(deployment_id)
+                    active_deployments[deployment_id]["status"] = status.status
+                    active_deployments[deployment_id]["is_healthy"] = status.is_healthy
+                except:
+                    # If we can't get status, mark as unknown
+                    active_deployments[deployment_id]["status"] = "unknown"
+                    active_deployments[deployment_id]["is_healthy"] = False
+        
+        return {
+            "deployments": list(active_deployments.values()),
+            "total": len(active_deployments)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list deployments: {str(e)}")
+
+# ============================================================================
+# Application Lifecycle Management
+# ============================================================================
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on application shutdown"""
+    await cleanup_mcp_manager()

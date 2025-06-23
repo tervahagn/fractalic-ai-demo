@@ -85,4 +85,32 @@ class DeploymentInfo:
     metadata: Optional[Dict[str, Any]] = None
 
 
+@dataclass
+class PublishRequest:
+    """Request for publishing/deployment"""
+    config: Dict[str, Any]
+    script_path: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class PublishResponse:
+    """Response from publishing/deployment"""
+    success: bool
+    message: str
+    endpoint_url: str
+    deployment_id: str
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class DeploymentStatusInfo:
+    """Detailed deployment status information"""
+    deployment_id: str
+    status: str
+    is_healthy: bool
+    last_updated: str
+    metadata: Optional[Dict[str, Any]] = None
+
+
 ProgressCallback = Callable[[str, int], None]  # message, percentage

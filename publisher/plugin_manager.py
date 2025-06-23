@@ -26,6 +26,42 @@ class PluginManager:
         self.plugins: Dict[str, BasePublishPlugin] = {}
         self.plugin_info: Dict[str, PluginInfo] = {}
         
+        # Load built-in plugins
+        self._load_builtin_plugins()
+        
+    def _load_builtin_plugins(self):
+        """Load built-in plugins that don't require separate plugin files"""
+        try:
+            # Load Docker Registry plugin
+            from .plugins.docker_registry_plugin import DockerRegistryPlugin
+            docker_plugin = DockerRegistryPlugin()
+            self.plugins["docker-registry"] = docker_plugin
+            
+            # Create plugin info for Docker Registry plugin
+            from .models import PluginInfo, PluginCapability
+            docker_info = PluginInfo(
+                name="docker-registry",
+                display_name="Docker Registry",
+                description="Fast deployment using pre-built Docker images from registry",
+                version="1.0.0",
+                homepage_url="https://github.com/yourusername/fractalic",
+                documentation_url="https://github.com/yourusername/fractalic/docs",
+                capabilities=[
+                    PluginCapability.ONE_CLICK_DEPLOY,
+                    PluginCapability.INSTANT_PREVIEW
+                ],
+                pricing_info="Free (uses your own Docker registry)",
+                setup_difficulty="easy",
+                deploy_time_estimate="< 1 min",
+                free_tier_limits="Unlimited (local deployment)"
+            )
+            self.plugin_info["docker-registry"] = docker_info
+            
+            self.logger.info("Loaded built-in Docker Registry plugin")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load built-in plugins: {e}")
+    
     def discover_plugins(self) -> List[str]:
         """Discover all available plugins"""
         discovered = []
