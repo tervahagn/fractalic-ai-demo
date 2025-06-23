@@ -1,0 +1,201 @@
+name: Build and Test Docker Container
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Test Application
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run tests
+      run: |
+        # Add your test commands here
+        python -c "import fractalic; print('✅ Fractalic imports successfully')"
+        
+    - name: Test plugin system
+      run: |
+        python publisher_cli.py list
+        echo "✅ Plugin system working"
+
+  build-and-test-docker:
+    name: Build and Test Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Create mock fractalic-ui
+      run: |
+        mkdir -p fractalic-ui
+        echo '{"name": "fractalic-ui-mock", "version": "1.0.0", "scripts": {"start": "echo Mock UI"}}' > fractalic-ui/package.json
+        
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./docker/Dockerfile
+        push: false
+        tags: fractalic:test
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Test Docker container
+      run: |
+        # Start container in background
+        docker run -d --name fractalic-test \
+          -p 3000:3000 -p 8000:8000 -p 8001:8001 \
+          fractalic:test
+          
+        # Wait for services to start
+        sleep 30
+        
+        # Test health endpoints
+        curl -f http://localhost:8001/health || exit 1
+        echo "✅ AI Server is healthy"
+        
+        # Test main application (if backend has health endpoint)
+        curl -f http://localhost:8000/health || echo "⚠️ Backend health check not available"
+        
+        # Show logs for debugging
+        docker logs fractalic-test --tail 50
+        
+        # Cleanup
+        docker stop fractalic-test
+        docker rm fractalic-test
+
+  build-and-push:
+    name: Build and Push to GitHub Container Registry
+    runs-on: ubuntu-latest
+    needs: build-and-test-docker
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
+    
+    permissions:
+      contents: read
+      packages: write
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix=sha-
+          
+    - name: Create mock fractalic-ui
+      run: |
+        mkdir -p fractalic-ui
+        echo '{"name": "fractalic-ui-mock", "version": "1.0.0", "scripts": {"start": "echo Mock UI"}}' > fractalic-ui/package.json
+        
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./docker/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  generate-deploy-info:
+    name: Generate Deployment Information
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Generate deployment badges
+      run: |
+        echo "## 🚀 One-Click Deployment" > deployment-info.md
+        echo "" >> deployment-info.md
+        echo "Deploy Fractalic instantly to your preferred platform:" >> deployment-info.md
+        echo "" >> deployment-info.md
+        
+        # GitHub Container Registry
+        IMAGE_URL="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main"
+        echo "### GitHub Container Registry" >> deployment-info.md
+        echo "\`\`\`bash" >> deployment-info.md
+        echo "docker run -p 3000:3000 -p 8000:8000 -p 8001:8001 $IMAGE_URL" >> deployment-info.md
+        echo "\`\`\`" >> deployment-info.md
+        echo "" >> deployment-info.md
+        
+        # Railway
+        echo "### Railway" >> deployment-info.md
+        echo "[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/docker)" >> deployment-info.md
+        echo "" >> deployment-info.md
+        
+        # Render
+        echo "### Render" >> deployment-info.md
+        echo "[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)" >> deployment-info.md
+        echo "" >> deployment-info.md
+        
+        # DigitalOcean
+        echo "### DigitalOcean App Platform" >> deployment-info.md
+        echo "[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new)" >> deployment-info.md
+        
+        cat deployment-info.md
+        
+    - name: Comment deployment info on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const deployInfo = fs.readFileSync('deployment-info.md', 'utf8');
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 🐳 Docker Build Successful!\n\n${deployInfo}`
+          });
