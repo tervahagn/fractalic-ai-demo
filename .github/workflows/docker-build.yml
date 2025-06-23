@@ -47,22 +47,36 @@ jobs:
     needs: test
     
     steps:
-    - name: Checkout code
+    - name: Checkout fractalic repo
       uses: actions/checkout@v4
+      with:
+        path: fractalic
+
+    - name: Checkout fractalic-ui repo
+      uses: actions/checkout@v4
+      with:
+        repository: fractalic-ai/fractalic-ui
+        path: fractalic-ui
+
+    - name: Setup build context (like docker_build_run.sh)
+      run: |
+        # Copy docker files to root (like the build script does)
+        cp -a fractalic/docker/. .
+        
+        # List what we have for debugging
+        echo "Build context contents:"
+        ls -la
+        echo "fractalic-ui contents:"
+        ls -la fractalic-ui/
       
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
       
-    - name: Create mock fractalic-ui
-      run: |
-        mkdir -p fractalic-ui
-        echo '{"name": "fractalic-ui-mock", "version": "1.0.0", "scripts": {"start": "echo Mock UI"}}' > fractalic-ui/package.json
-        
     - name: Build Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./docker/Dockerfile
+        file: ./Dockerfile
         push: false
         tags: fractalic:test
         cache-from: type=gha
@@ -103,8 +117,25 @@ jobs:
       packages: write
       
     steps:
-    - name: Checkout code
+    - name: Checkout fractalic repo
       uses: actions/checkout@v4
+      with:
+        path: fractalic
+
+    - name: Checkout fractalic-ui repo
+      uses: actions/checkout@v4
+      with:
+        repository: fractalic-ai/fractalic-ui
+        path: fractalic-ui
+
+    - name: Setup build context (like docker_build_run.sh)
+      run: |
+        # Copy docker files to root (like the build script does)
+        cp -a fractalic/docker/. .
+        
+        # List what we have for debugging
+        echo "Build context contents:"
+        ls -la
       
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -128,16 +159,11 @@ jobs:
           type=semver,pattern={{major}}.{{minor}}
           type=sha,prefix=sha-
           
-    - name: Create mock fractalic-ui
-      run: |
-        mkdir -p fractalic-ui
-        echo '{"name": "fractalic-ui-mock", "version": "1.0.0", "scripts": {"start": "echo Mock UI"}}' > fractalic-ui/package.json
-        
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./docker/Dockerfile
+        file: ./Dockerfile
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
