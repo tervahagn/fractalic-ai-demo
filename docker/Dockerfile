@@ -56,10 +56,8 @@ COPY fractalic-ui/ /app/fractalic-ui/
 # Replace next.config.mjs with Docker-specific version for container networking
 COPY next.config.docker.mjs /app/fractalic-ui/next.config.mjs
 
-# Build the frontend for production
-RUN cd /app/fractalic-ui && \
-    ls -la && \
-    (npm run build || echo "Frontend build failed - will try to run in dev mode")
+# Skip npm run build - we use npm run dev in supervisord anyway
+# This makes Docker builds much faster since production build is unused
 
 # Create a logs directory and set ownership
 RUN mkdir -p /app/logs && chown -R appuser:appuser /app/logs
