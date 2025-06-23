@@ -44,7 +44,8 @@ COPY fractalic/fractalic_mcp_manager.py /app/
 COPY fractalic/core/ /app/core/
 COPY fractalic/ai_server/ /app/ai_server/
 COPY fractalic/publisher/ /app/publisher/
-COPY fractalic/settings.toml /app/
+# Copy settings.toml if it exists (optional for CI builds, required for local with user keys)
+COPY fractalic/settings.toml* /app/
 # Copy mcp_servers.json if it exists (optional for CI builds)
 COPY fractalic/mcp_servers.json* /app/
 COPY fractalic/*.py /app/
