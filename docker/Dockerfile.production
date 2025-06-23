@@ -66,8 +66,11 @@ ENV PYTHONPATH=/fractalic
 # Set working directory
 WORKDIR /fractalic
 
+# Switch to the non-root user (matching local Dockerfile)
+USER appuser
+
 # Expose the necessary ports (matches local logic)
 EXPOSE 8000 3000 8001 8002 8003 8004 5859
 
-# Start Supervisor as root (it will manage user switching for individual processes)
+# Start Supervisor (matches local logic)
 CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
