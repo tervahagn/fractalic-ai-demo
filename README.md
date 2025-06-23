@@ -1,5 +1,6 @@
 # Fractalic
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Deploy Now](https://img.shields.io/badge/🚀%20Deploy%20Now-One%20Click-brightgreen?style=for-the-badge)](https://fractalic-ai.github.io/fractalic/deploy/)
 
 Program AI in plain language (any language). That's it.
 
@@ -12,6 +13,57 @@ Modern AI workflows shouldn’t be harder than they already are. We have powerfu
 ## What is Fractalic? ✨
 
 Fractalic combines Markdown and YAML to create agentic AI systems using straightforward, human-readable documents. It lets you grow context step by step, control AI knowledge precisely, and orchestrate complex workflows through simple document structure and syntax.
+
+## 🚀 Quick Deploy
+
+Try Fractalic instantly with one-click deployment:
+
+### 🐳 Local Docker (Fastest)
+[![Deploy with Docker](https://img.shields.io/badge/Deploy-Docker%20Desktop-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://fractalic-ai.github.io/fractalic/deploy/)
+
+```bash
+curl -s https://raw.githubusercontent.com/fractalic-ai/fractalic/main/deploy/docker-deploy.sh | bash
+```
+
+### ☁️ GitHub Codespaces (No Installation)
+[![Open in GitHub Codespaces](https://img.shields.io/badge/Open%20in-Codespaces-24292f?style=for-the-badge&logo=github&logoColor=white)](https://codespaces.new/fractalic-ai/fractalic?quickstart=1)
+
+*Perfect for testing without local installation - runs entirely in the cloud!*
+
+### 🔧 Plugin-Based Deployment
+```bash
+# Clone and use our new publisher CLI
+git clone https://github.com/fractalic-ai/fractalic.git
+cd fractalic
+python publisher_cli.py deploy local_docker --name my-fractalic-app
+```
+
+**Access after deployment:**
+- 🖥️ **Frontend UI**: http://localhost:3000
+- ⚙️ **Backend API**: http://localhost:8000  
+- 🤖 **AI Server**: http://localhost:8001
+
+### 🌐 Cloud Deploy (Coming Soon)
+
+[![Deploy on Railway](https://img.shields.io/badge/Deploy-Railway-0B0D0E?style=for-the-badge&logo=railway&logoColor=white)](https://railway.app/template/docker)
+[![Deploy to Render](https://img.shields.io/badge/Deploy-Render-46E3B7?style=for-the-badge&logo=render&logoColor=white)](https://render.com/deploy)
+[![Deploy to Fly.io](https://img.shields.io/badge/Deploy-Fly.io-8B5CF6?style=for-the-badge&logo=fly.io&logoColor=white)](https://fly.io/launch)
+
+*Cloud deployment plugins coming soon! The new plugin-based publisher will support one-click deployment to Railway, Render, Fly.io and more.*
+
+### 📋 What You Get After Deployment:
+- 🖥️ **Frontend UI**: http://localhost:3000 (Interactive notebook-style interface)
+- ⚙️ **Backend API**: http://localhost:8000 (REST API for integration)  
+- 🤖 **AI Server**: http://localhost:8001 (Fractalic script execution engine)
+- 🔧 **MCP Manager**: http://localhost:5859 (Model Context Protocol server management)
+
+### 🎯 Choose Your Deployment:
+| Method | Best For | Time | Requirements |
+|--------|----------|------|--------------|
+| 🐳 **Docker** | Local development, demos | 2-3 min | Docker Desktop |
+| ☁️ **Codespaces** | No-install testing, learning | 3-4 min | GitHub account |
+| 🔧 **Plugin CLI** | Advanced users, CI/CD | 2-5 min | Python + Docker |
+| 🌐 **Cloud** | Production, sharing | 1-2 min | Platform account |
 
 ## Tutorial 101 
 Whatch this video with quick project overview and 101 concepts how to use it (picture is clickable YouTube [link](https://www.youtube.com/watch?v=iRqIzmKE8uw))

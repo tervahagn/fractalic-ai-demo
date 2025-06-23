@@ -1,0 +1,37 @@
+{
+  "name": "Fractalic Development Environment",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "forwardPorts": [3000, 8000, 8001, 5859],
+  "portsAttributes": {
+    "3000": {
+      "label": "Frontend UI",
+      "onAutoForward": "openBrowser"
+    },
+    "8000": {
+      "label": "Backend API"
+    },
+    "8001": {
+      "label": "AI Server"
+    },
+    "5859": {
+      "label": "MCP Manager"
+    }
+  },
+  "postCreateCommand": ".devcontainer/setup.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "bradlc.vscode-tailwindcss",
+        "esbenp.prettier-vscode"
+      ]
+    }
+  }
+}

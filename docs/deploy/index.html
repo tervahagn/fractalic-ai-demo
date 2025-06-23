@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deploy Fractalic - One-Click Setup</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 2rem;
+            max-width: 600px;
+            width: 90%;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        h1 { margin-bottom: 1rem; font-size: 2.5rem; }
+        .subtitle { margin-bottom: 2rem; opacity: 0.9; font-size: 1.1rem; }
+        .deploy-options { display: grid; gap: 1rem; margin-bottom: 2rem; }
+        .deploy-card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 1.5rem;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: transform 0.2s;
+        }
+        .deploy-card:hover { transform: translateY(-5px); }
+        .deploy-title { font-size: 1.3rem; margin-bottom: 0.5rem; }
+        .deploy-desc { opacity: 0.8; margin-bottom: 1rem; }
+        .deploy-btn {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1rem;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            transition: background 0.2s;
+        }
+        .deploy-btn:hover { background: #45a049; }
+        .docker-btn { background: #2496ED; }
+        .docker-btn:hover { background: #1976D2; }
+        .codespaces-btn { background: #24292f; }
+        .codespaces-btn:hover { background: #1a1e22; }
+        .code-snippet {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+            font-family: 'Monaco', 'Consolas', monospace;
+            text-align: left;
+            overflow-x: auto;
+        }
+        .copy-btn {
+            background: rgba(255, 255, 255, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            float: right;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Deploy Fractalic</h1>
+        <p class="subtitle">Choose your preferred deployment method and get started in minutes!</p>
+        
+        <div class="deploy-options">
+            <div class="deploy-card">
+                <div class="deploy-title">🐳 Docker Desktop</div>
+                <div class="deploy-desc">
+                    Fastest option for local development. Requires Docker Desktop installed.
+                    <div class="code-snippet">
+                        <button class="copy-btn" onclick="copyToClipboard('docker-cmd')">Copy</button>
+                        <code id="docker-cmd">curl -s https://raw.githubusercontent.com/fractalic-ai/fractalic/main/deploy/docker-deploy.sh | bash</code>
+                    </div>
+                </div>
+                <a href="#" onclick="deployDocker()" class="deploy-btn docker-btn">Deploy with Docker</a>
+            </div>
+            
+            <div class="deploy-card">
+                <div class="deploy-title">☁️ GitHub Codespaces</div>
+                <div class="deploy-desc">
+                    Perfect for testing without local installation. Runs entirely in the cloud.
+                </div>
+                <a href="https://codespaces.new/fractalic-ai/fractalic?quickstart=1" class="deploy-btn codespaces-btn" target="_blank">Open in Codespaces</a>
+            </div>
+            
+            <div class="deploy-card">
+                <div class="deploy-title">🔧 Plugin CLI</div>
+                <div class="deploy-desc">
+                    Advanced deployment with our new plugin system.
+                    <div class="code-snippet">
+                        <button class="copy-btn" onclick="copyToClipboard('cli-cmd')">Copy</button>
+                        <code id="cli-cmd">git clone https://github.com/fractalic-ai/fractalic.git<br>cd fractalic<br>python publisher_cli.py deploy local_docker --name my-app</code>
+                    </div>
+                </div>
+                <a href="https://github.com/fractalic-ai/fractalic" class="deploy-btn" target="_blank">Clone & Deploy</a>
+            </div>
+        </div>
+        
+        <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid rgba(255, 255, 255, 0.2);">
+            <p style="opacity: 0.8;">After deployment, access Fractalic at:</p>
+            <p><strong>🖥️ Frontend:</strong> http://localhost:3000</p>
+            <p><strong>⚙️ Backend:</strong> http://localhost:8000</p>
+            <p><strong>🤖 AI Server:</strong> http://localhost:8001</p>
+        </div>
+    </div>
+
+    <script>
+        function copyToClipboard(elementId) {
+            const text = document.getElementById(elementId).textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                event.target.textContent = 'Copied!';
+                setTimeout(() => event.target.textContent = 'Copy', 2000);
+            });
+        }
+        
+        function deployDocker() {
+            if (confirm('This will download and run the Docker deployment script. Make sure you have Docker Desktop installed and running.\n\nContinue?')) {
+                const link = document.createElement('a');
+                link.href = 'https://raw.githubusercontent.com/fractalic-ai/fractalic/main/deploy/docker-deploy.sh';
+                link.download = 'docker-deploy.sh';
+                link.click();
+                
+                alert('Script downloaded! Run it in your terminal:\n\nbash docker-deploy.sh\n\nOr copy and paste the command shown above.');
+            }
+        }
+    </script>
+</body>
+</html>
