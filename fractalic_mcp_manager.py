@@ -7,6 +7,7 @@
 #   python fractalic_mcp_manager.py tools        [--port 5859]
 #   python fractalic_mcp_manager.py start NAME   [--port 5859]
 #   python fractalic_mcp_manager.py stop  NAME   [--port 5859]
+#   python fractalic_mcp_manager.py restart NAME [--port 5859]
 # ---------------------------------------------------------
 from __future__ import annotations
 
@@ -1498,6 +1499,20 @@ class Supervisor:
                 raise web.HTTPNotFound(text=f"{tgt} unknown")
             await c.cleanup()
     
+    async def restart(self, tgt):
+        """Restart an MCP server by stopping it and starting it again."""
+        if tgt == "all":
+            # Restart all children
+            for c in self.children.values():
+                await c.cleanup()
+                await c.start()
+        else:
+            c = self.children.get(tgt)
+            if not c:
+                raise web.HTTPNotFound(text=f"{tgt} unknown")
+            await c.cleanup()
+            await c.start()
+    
     async def stop_local_only(self):
         """Stop only local stdio servers, skip remote HTTP servers."""
         local_children = [c for c in self.children.values() if c.transport == "stdio"]
@@ -1593,6 +1608,7 @@ def build_app(sup: Supervisor, stop_event: asyncio.Event):
     app.router.add_get ("/list_tools",  lambda r: _await_json(r, sup.tools()))
     app.router.add_post("/start/{n}",   lambda r: _mut(r, sup, "start"))
     app.router.add_post("/stop/{n}",    lambda r: _mut(r, sup, "stop"))
+    app.router.add_post("/restart/{n}", lambda r: _mut(r, sup, "restart"))
     app.router.add_post("/call_tool",   lambda r: _call(r, sup))
     app.router.add_post("/add_server",  lambda r: _add_server(r, sup))
     app.router.add_post("/delete_server", lambda r: _delete_server(r, sup))
@@ -2003,7 +2019,7 @@ async def client_call(port: int, verb: str, tgt: Optional[str] = None):
         try:
             if verb in ("status", "tools"):
                 r = await s.get(f"{url}/{verb}"); print(json.dumps(await r.json(), indent=2))
-            elif verb in ("start", "stop"):
+            elif verb in ("start", "stop", "restart"):
                 await s.post(f"{url}/{verb}/{tgt}")
             elif verb == "kill":
                 await s.post(f"{url}/kill")
@@ -2019,7 +2035,7 @@ def _parser():
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("serve"); sub.add_parser("status"); sub.add_parser("tools")
     sub.add_parser("kill")
-    for v in ("start", "stop"):
+    for v in ("start", "stop", "restart"):
         sc = sub.add_parser(v); sc.add_argument("target")
     # Add tools-dump command
     dump = sub.add_parser("tools-dump")
