@@ -13,17 +13,19 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from ..base_plugin import BasePlugin
-from ..models import PublishRequest, PublishResponse, DeploymentStatus
+from ..base_plugin import BasePublishPlugin
+from ..models import PublishRequest, PublishResponse, DeploymentStatus, PluginInfo, DeploymentInfo, PluginInfo, PluginCapability
 
 
-class DockerRegistryPlugin(BasePlugin):
+class DockerRegistryPlugin(BasePublishPlugin):
     """Plugin for deploying to pre-built Docker registry images"""
     
     plugin_name = "docker-registry"
     
     def __init__(self):
         super().__init__()
+        import logging
+        self.logger = logging.getLogger(__name__)
         self.default_registry = "ghcr.io/fractalic-ai/fractalic"
         self.default_ports = {
             "frontend": 3000,
@@ -70,8 +72,7 @@ class DockerRegistryPlugin(BasePlugin):
         
         # Mount paths
         validated["mount_paths"] = config.get("mount_paths", {
-            "user_scripts": "/fractalic/user-scripts",
-            "user_config": "/fractalic/user-config",
+            "user_scripts": "/payload",
             "logs": "/fractalic/logs"
         })
         
@@ -186,18 +187,14 @@ class DockerRegistryPlugin(BasePlugin):
         ]
         
         # Add port mappings
+        used_ports = set()
         for service, port in config["ports"].items():
-            host_port = self._find_available_port(port)
+            host_port = self._find_available_port(port, used_ports)
+            used_ports.add(host_port)
             cmd.extend(["-p", f"{host_port}:{port}"])
             
-        # Add volume mounts
-        temp_path = Path(temp_dir)
-        scripts_path = temp_path / "scripts"
-        config_path = temp_path / "config"
-        
+        # Add volume mounts (logs only - user scripts will be copied)
         cmd.extend([
-            "-v", f"{scripts_path}:{config['mount_paths']['user_scripts']}/{config['script_name']}:ro",
-            "-v", f"{config_path}:{config['mount_paths']['user_config']}:ro",
             "-v", f"{os.getcwd()}/logs:/fractalic/logs"
         ])
         
@@ -215,11 +212,16 @@ class DockerRegistryPlugin(BasePlugin):
         self.logger.info(f"Started container: {container_name} ({container_id[:12]})")
         return container_id
         
-    def _find_available_port(self, preferred_port: int) -> int:
+    def _find_available_port(self, preferred_port: int, used_ports: set = None) -> int:
         """Find an available port, starting with the preferred one"""
         import socket
         
+        if used_ports is None:
+            used_ports = set()
+        
         for port in range(preferred_port, preferred_port + 100):
+            if port in used_ports:
+                continue
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.bind(('localhost', port))
@@ -312,7 +314,10 @@ class DockerRegistryPlugin(BasePlugin):
             # Prepare user files
             with self._prepare_user_files(config) as temp_dir:
                 # Start container
-                container_id = self._start_container(config, temp_dir.name)
+                container_id = self._start_container(config, temp_dir)
+                
+                # Copy files into container (cloud-ready approach)
+                self._copy_files_to_container(config["container_name"], temp_dir, config)
                 
                 # Health check
                 health_status = self._health_check(config)
@@ -396,3 +401,385 @@ class DockerRegistryPlugin(BasePlugin):
         except Exception as e:
             self.logger.error(f"Cleanup failed for {deployment_id}: {str(e)}")
             return False
+        
+    def get_info(self) -> PluginInfo:
+        """Get plugin information"""
+        return PluginInfo(
+            name=self.plugin_name,
+            display_name="Docker Registry",
+            description="Deploy using pre-built Docker images from registry",
+            version="1.0.0",
+            homepage_url="https://github.com/fractalic-ai/fractalic",
+            documentation_url="https://github.com/fractalic-ai/fractalic/docs",
+            capabilities=[PluginCapability.INSTANT_PREVIEW],
+            pricing_info="Free",
+            setup_difficulty="easy",
+            deploy_time_estimate="< 1 min",
+            free_tier_limits="Unlimited local deployments"
+        )
+
+    def get_deployment_info(self, deployment_id: str) -> Optional[DeploymentInfo]:
+        """Get information about a specific deployment"""
+        from ..models import DeploymentInfo
+        # For now, return basic info based on container status
+        try:
+            cmd = ["docker", "inspect", deployment_id]
+            result = self._run_command(cmd)
+            if result.returncode == 0:
+                return DeploymentInfo(
+                    deployment_id=deployment_id,
+                    status=self.get_status(deployment_id),
+                    plugin_name=self.plugin_name,
+                    container_name=deployment_id
+                )
+        except Exception:
+            pass
+        return None
+
+    def list_deployments(self) -> List[DeploymentInfo]:
+        """List all deployments managed by this plugin"""
+        from ..models import DeploymentInfo
+        deployments = []
+        try:
+            # List containers with our label/tag
+            cmd = ["docker", "ps", "-a", "--filter", "label=fractalic-deploy", "--format", "{{.Names}}"]
+            result = self._run_command(cmd)
+            if result.returncode == 0:
+                container_names = result.stdout.strip().split('\n')
+                for name in container_names:
+                    if name:
+                        info = self.get_deployment_info(name)
+                        if info:
+                            deployments.append(info)
+        except Exception:
+            pass
+        return deployments
+
+    def stop_deployment(self, deployment_id: str) -> bool:
+        """Stop a deployment"""
+        try:
+            cmd = ["docker", "stop", deployment_id]
+            result = self._run_command(cmd)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def delete_deployment(self, deployment_id: str) -> bool:
+        """Delete a deployment"""
+        try:
+            # Stop first, then remove
+            self.stop_deployment(deployment_id)
+            cmd = ["docker", "rm", deployment_id]
+            result = self._run_command(cmd)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def get_logs(self, deployment_id: str, lines: int = 100) -> Optional[str]:
+        """Get deployment logs"""
+        try:
+            cmd = ["docker", "logs", "--tail", str(lines), deployment_id]
+            result = self._run_command(cmd)
+            if result.returncode == 0:
+                return result.stdout
+        except Exception:
+            pass
+        return None
+
+    def _copy_files_to_container(self, container_name: str, temp_dir: str, config: Dict[str, Any]) -> None:
+        """Copy prepared files directly into the running container"""
+        temp_path = Path(temp_dir)
+        scripts_path = temp_path / "scripts"
+        config_path = temp_path / "config"
+        
+        # Ensure payload directory exists in container (run as root)
+        payload_base = config['mount_paths']['user_scripts']
+        payload_path = f"{payload_base}/{config['script_name']}"
+        
+        # Create the base payload directory as root if it doesn't exist
+        self._run_command([
+            "docker", "exec", "--user", "root", container_name, 
+            "mkdir", "-p", payload_base
+        ])
+        
+        # Create the script-specific directory as root
+        self._run_command([
+            "docker", "exec", "--user", "root", container_name, 
+            "mkdir", "-p", payload_path
+        ])
+        
+        # Copy all files from scripts directory to container
+        if scripts_path.exists():
+            for item in scripts_path.iterdir():
+                if item.is_file():
+                    # Copy individual files
+                    self._run_command([
+                        "docker", "cp", str(item), 
+                        f"{container_name}:{payload_path}/{item.name}"
+                    ])
+                    self.logger.info(f"Copied {item.name} to container {payload_path}")
+                elif item.is_dir():
+                    # Copy directories recursively
+                    self._run_command([
+                        "docker", "cp", str(item), 
+                        f"{container_name}:{payload_path}/"
+                    ])
+                    self.logger.info(f"Copied directory {item.name} to container {payload_path}")
+
+        # Copy configuration files from main directory to /fractalic
+        main_config_files = ["mcp_servers.json", "settings.toml"]
+        current_dir = Path.cwd()
+        
+        for config_file in main_config_files:
+            config_file_path = current_dir / config_file
+            if config_file_path.exists():
+                self._run_command([
+                    "docker", "cp", str(config_file_path), 
+                    f"{container_name}:/fractalic/{config_file}"
+                ])
+                self.logger.info(f"Copied main config file {config_file} to /fractalic/")
+                
+                # For settings.toml, also copy to root directory where backend expects it
+                if config_file == "settings.toml":
+                    self._run_command([
+                        "docker", "cp", str(config_file_path), 
+                        f"{container_name}:/{config_file}"
+                    ])
+                    self.logger.info(f"Copied {config_file} to root directory for backend compatibility")
+        
+        # Also copy configuration files from temp directory if they exist
+        if config_path.exists():
+            for config_file in config_path.iterdir():
+                if config_file.is_file():
+                    self._run_command([
+                        "docker", "cp", str(config_file), 
+                        f"{container_name}:/fractalic/{config_file.name}"
+                    ])
+                    self.logger.info(f"Copied config file {config_file.name} to /fractalic/")
+        
+        # Create symlink from /fractalic/payload to /payload so UI can see deployed scripts
+        self._run_command([
+            "docker", "exec", "--user", "root", container_name,
+            "ln", "-sf", "/payload", "/fractalic/payload"
+        ])
+        self.logger.info("Created symlink from /fractalic/payload to /payload for UI visibility")
+
+        # Set proper ownership for copied files (run as root)
+        self._run_command([
+            "docker", "exec", "--user", "root", container_name,
+            "chown", "-R", "appuser:appuser", payload_base
+        ])
+        
+        # Set proper ownership for config files if they exist (run as root)
+        try:
+            self._run_command([
+                "docker", "exec", "--user", "root", container_name,
+                "chown", "appuser:appuser", "/fractalic/mcp_servers.json"
+            ])
+        except RuntimeError:
+            pass  # File might not exist
+            
+        try:
+            self._run_command([
+                "docker", "exec", "--user", "root", container_name,
+                "chown", "appuser:appuser", "/fractalic/settings.toml"
+            ])
+        except RuntimeError:
+            pass  # File might not exist
+            
+        # Also fix ownership for root settings.toml file
+        try:
+            self._run_command([
+                "docker", "exec", "--user", "root", container_name,
+                "chown", "appuser:appuser", "/settings.toml"
+            ])
+        except RuntimeError:
+            pass  # File might not exist
+        
+        # Fix the frontend config.json to have correct API endpoints
+        self._fix_frontend_config(container_name, config)
+        
+        # Fix the Next.js config for proper API rewrites
+        self._fix_nextjs_config(container_name, config)
+        
+        self.logger.info(f"Successfully copied all files to {payload_path} and config files to /fractalic/")
+        
+    def _fix_frontend_config(self, container_name: str, config: Dict[str, Any]) -> None:
+        """Fix the frontend config.json to have correct API endpoints for single-container deployment"""
+        
+        # Create the correct config for single-container deployment
+        # Use relative paths that will go through Next.js rewrites
+        correct_config = {
+            "api": {
+                "backend": "",  # Relative path - will use Next.js rewrites
+                "ai_server": "/ai",  # Will rewrite to http://localhost:8001
+                "mcp_manager": "/mcp"  # Will rewrite to http://localhost:5859 - this is the key fix!
+            },
+            "container": {
+                "internal_ports": {
+                    "frontend": 3000,
+                    "backend": 8000,
+                    "ai_server": 8001,
+                    "mcp_manager": 5859
+                },
+                "host_ports": config.get("ports", self.default_ports)
+            },
+            "deployment": {
+                "type": "docker",
+                "container_name": container_name,
+                "build_timestamp": datetime.now().timestamp()
+            },
+            "paths": {
+                "default_git_path": "/payload"  # Fix: point to our payload directory
+            }
+        }
+        
+        # Write the corrected config to a temporary file
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp_file:
+            json.dump(correct_config, tmp_file, indent=2)
+            tmp_config_path = tmp_file.name
+        
+        try:
+            # Copy the corrected config.json to the container
+            self._run_command([
+                "docker", "cp", tmp_config_path, 
+                f"{container_name}:/fractalic-ui/public/config.json"
+            ])
+            
+            # Fix ownership and permissions so the frontend can serve it
+            self._run_command([
+                "docker", "exec", "--user", "root", container_name,
+                "chown", "appuser:appuser", "/fractalic-ui/public/config.json"
+            ])
+            self._run_command([
+                "docker", "exec", "--user", "root", container_name,
+                "chmod", "644", "/fractalic-ui/public/config.json"
+            ])
+            
+            self.logger.info("Fixed frontend config.json with correct API endpoints and permissions")
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(tmp_config_path)
+            except OSError:
+                pass
+
+    def _fix_nextjs_config(self, container_name: str, config: Dict[str, Any]) -> None:
+        """Fix the Next.js config to include proper API rewrites for single-container deployment"""
+        
+        # Create the correct Next.js config with rewrites for all API endpoints
+        nextjs_config = '''/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'standalone',
+  trailingSlash: false,
+  
+  // Docker deployment: Use rewrites to proxy API calls to internal services
+  async rewrites() {
+    return [
+      // Backend API rewrites
+      {
+        source: '/list_directory',
+        destination: 'http://localhost:8000/list_directory',
+      },
+      {
+        source: '/branches_and_commits',
+        destination: 'http://localhost:8000/branches_and_commits',
+      },
+      {
+        source: '/get_file_content_disk',
+        destination: 'http://localhost:8000/get_file_content_disk',
+      },
+      {
+        source: '/create_file',
+        destination: 'http://localhost:8000/create_file',
+      },
+      {
+        source: '/create_folder',
+        destination: 'http://localhost:8000/create_folder',
+      },
+      {
+        source: '/get_file_content',
+        destination: 'http://localhost:8000/get_file_content',
+      },
+      {
+        source: '/save_file',
+        destination: 'http://localhost:8000/save_file',
+      },
+      {
+        source: '/delete_item',
+        destination: 'http://localhost:8000/delete_item',
+      },
+      {
+        source: '/rename_item',
+        destination: 'http://localhost:8000/rename_item',
+      },
+      {
+        source: '/load_settings',
+        destination: 'http://localhost:8000/load_settings',
+      },
+      {
+        source: '/save_settings',
+        destination: 'http://localhost:8000/save_settings',
+      },
+      // MCP Manager API rewrites - this is the key fix!
+      {
+        source: '/mcp/:path*',
+        destination: 'http://localhost:5859/:path*',
+      },
+      // AI Server API rewrites
+      {
+        source: '/ai/:path*',
+        destination: 'http://localhost:8001/:path*',
+      },
+    ];
+  },
+  
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          {
+            key: 'X-Content-Type-Options',
+            value: 'nosniff',
+          },
+        ],
+      },
+    ];
+  },
+};
+
+export default nextConfig;
+'''
+        
+        # Write the corrected config to a temporary file
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.mjs', delete=False) as tmp_file:
+            tmp_file.write(nextjs_config)
+            tmp_config_path = tmp_file.name
+        
+        try:
+            # Copy the corrected next.config.mjs to the container
+            self._run_command([
+                "docker", "cp", tmp_config_path, 
+                f"{container_name}:/fractalic-ui/next.config.mjs"
+            ])
+            
+            # Fix ownership and permissions
+            self._run_command([
+                "docker", "exec", "--user", "root", container_name,
+                "chown", "appuser:appuser", "/fractalic-ui/next.config.mjs"
+            ])
+            self._run_command([
+                "docker", "exec", "--user", "root", container_name,
+                "chmod", "644", "/fractalic-ui/next.config.mjs"
+            ])
+            
+            self.logger.info("Fixed Next.js config with API rewrites for proper port routing")
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(tmp_config_path)
+            except OSError:
+                pass

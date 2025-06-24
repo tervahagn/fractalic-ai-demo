@@ -113,4 +113,27 @@ class DeploymentStatusInfo:
     metadata: Optional[Dict[str, Any]] = None
 
 
+@dataclass
+class DockerRegistryDeploymentConfig:
+    """Configuration for Docker Registry Plugin deployment"""
+    image_name: str
+    container_name: str
+    ports: Dict[str, int]  # service_name -> port_number
+    environment_vars: Dict[str, str]
+    script_content: str
+    volumes: Optional[Dict[str, str]] = None  # host_path -> container_path
+    network_mode: Optional[str] = None
+    restart_policy: str = "unless-stopped"
+
+
+@dataclass 
+class DeploymentResult:
+    """Result of a deployment operation"""
+    success: bool
+    container_id: Optional[str] = None
+    ports: Optional[Dict[str, int]] = None
+    error: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
 ProgressCallback = Callable[[str, int], None]  # message, percentage
