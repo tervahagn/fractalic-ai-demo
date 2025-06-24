@@ -472,6 +472,11 @@ class Child:
         self.service_profile = ServiceProfile(name, spec, self.transport)
 
     async def start(self):
+        # Check if runner exists and is still running
+        if not self._runner or self._runner.done():
+            log(f"{self.name}: Creating new runner task for start")
+            self._runner = asyncio.create_task(self._loop())
+        
         await self._cmd_q.put(("start",))
 
     async def stop(self):
@@ -854,6 +859,98 @@ exec {full_command} 2>> "$LOG_FILE"
         
         if self._runner:
             self._runner.cancel()
+
+    async def _do_restart(self):
+        """Properly restart the child without breaking the event loop."""
+        log(f"{self.name}: Starting restart sequence")
+        
+        # Track restart time and count
+        self.last_restart_time = time.time()
+        self.restart_count += 1
+        
+        # First, do a controlled stop (without cancelling runner)
+        await self._controlled_stop()
+        
+        # Small delay to ensure cleanup is complete
+        await asyncio.sleep(0.5)
+        
+        # Check if the runner is still alive, recreate if needed
+        if self._runner and self._runner.done():
+            log(f"{self.name}: Creating new runner task for restart")
+            self._runner = asyncio.create_task(self._loop())
+        
+        # Reset retry count for fresh start
+        self.retries = 0
+        
+        # Now restart by sending start command to the queue
+        await self._cmd_q.put(("start",))
+        log(f"{self.name}: Restart command queued")
+
+    async def _controlled_stop(self):
+        """Stop the child without cancelling the main runner task."""
+        if self.state == "stopped":
+            return
+        self.state = "stopping"
+        
+        # Cancel health check first
+        if self._health:
+            self._health.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._health
+            self._health = None
+        
+        # Cancel output capture tasks
+        if self._stdout_task:
+            self._stdout_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._stdout_task
+            self._stdout_task = None
+            
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._stderr_task
+            self._stderr_task = None
+            
+        if hasattr(self, '_log_monitor_task') and self._log_monitor_task:
+            self._log_monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._log_monitor_task
+            self._log_monitor_task = None
+        
+        # Close session
+        await self._close_session()
+        
+        # Terminate process
+        if self.proc:
+            try:
+                self.proc.terminate()
+                await asyncio.wait_for(self.proc.wait(), timeout=5)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                try:
+                    self.proc.kill()
+                    await self.proc.wait()
+                except ProcessLookupError:
+                    pass  # Process already gone
+            
+            # Explicitly close pipes
+            for pipe in [self.proc.stdin, self.proc.stdout, self.proc.stderr]:
+                if pipe:
+                    try:
+                        if hasattr(pipe, 'is_closing') and pipe.is_closing():
+                            continue
+                        pipe.close()
+                        if hasattr(pipe, 'wait_closed'):
+                            await pipe.wait_closed()
+                    except Exception:
+                        pass
+        
+        self.proc, self.pid = None, None
+        self.state = "stopped"
+        self.healthy = False
+        self.session_at = 0.0
+        
+        log(f"{self.name} ↓ (controlled stop)")
 
     async def _spawn_if_needed(self):
         # For HTTP transport, no subprocess is needed
@@ -1504,14 +1601,12 @@ class Supervisor:
         if tgt == "all":
             # Restart all children
             for c in self.children.values():
-                await c.cleanup()
-                await c.start()
+                await c._do_restart()
         else:
             c = self.children.get(tgt)
             if not c:
                 raise web.HTTPNotFound(text=f"{tgt} unknown")
-            await c.cleanup()
-            await c.start()
+            await c._do_restart()
     
     async def stop_local_only(self):
         """Stop only local stdio servers, skip remote HTTP servers."""
