@@ -340,6 +340,13 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
     target_block_uri = to_params.get('block_uri') if to_params else None
     target_nested = to_params.get('nested_flag', False) if to_params else False
 
+    # Check if tools are being used for this operation
+    tools_param = params.get('tools', 'none')
+    using_tools = tools_param != 'none'
+    
+    # Initialize Tool Loop AST only if tools are being used
+    tool_loop_ast = AST("") if using_tools else None
+
     # Build prompt parts based on parameters
     prompt_parts = []
     messages = []  # Parallel collection of messages with roles
@@ -434,9 +441,6 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
     Config.API_KEY = provider_cfg.get('apiKey')
     llm_client = LLMClient(model=llm_model)
     
-    # Initialize Tool Loop AST for this LLM operation
-    tool_loop_ast = AST("")
-    
     # Set execution context for tool registry if available
     if hasattr(llm_client.client, 'registry'):
         current_file = getattr(current_node, 'created_by_file', None)
@@ -451,8 +455,8 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
             current_node=current_node  # Pass current @llm operation node for attribution
         )
         
-        # Pass Tool Loop AST to the LLM client for real-time updates
-        if hasattr(llm_client.client, 'tool_loop_ast'):
+        # Pass Tool Loop AST to the LLM client for real-time updates (only if using tools)
+        if hasattr(llm_client.client, 'tool_loop_ast') and tool_loop_ast is not None:
             llm_client.client.tool_loop_ast = tool_loop_ast
     
     actual_model = model if model else getattr(llm_client.client, 'settings', {}).get('model', llm_model)    # Add system prompt to params for LLM clients that use it
@@ -471,9 +475,9 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
             if 'messages' in response:
                 current_node.response_messages = response['messages']
                 
-                # Process tool calls to build Tool Loop AST
+                # Process tool calls to build Tool Loop AST (only if using tools)
                 tool_messages = [msg for msg in response['messages'] if msg.get('role') == 'tool']
-                if tool_messages:
+                if tool_messages and tool_loop_ast is not None:
                     # Update Tool Loop AST with tool responses
                     new_tool_ast = process_tool_calls(ast, tool_messages)
                     if new_tool_ast.parser.nodes:
@@ -550,7 +554,7 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
     current_node.response_content = response_text
       # Handle response AST creation and insertion
     # Skip AST operation if direct context was already inserted to prevent duplicate nodes
-    skip_ast_operation = bool(tool_loop_ast.parser.nodes)
+    skip_ast_operation = bool(tool_loop_ast and tool_loop_ast.parser.nodes)
     
     if not skip_ast_operation:        # Check if header-auto-align is enabled
         header_auto_align = params.get('header-auto-align', False)
@@ -601,7 +605,7 @@ def process_llm(ast: AST, current_node: Node, call_tree_node=None, committed_fil
             operation=operation_type
         )
     else:
-        print(f"[DEBUG] Skipping AST operation - direct context already inserted {len(tool_loop_ast.parser.nodes)} nodes")
+        print(f"[DEBUG] Skipping AST operation - direct context already inserted {len(tool_loop_ast.parser.nodes) if tool_loop_ast else 0} nodes")
         # When skipping AST operation, append response content to current node to preserve tool calls in context file
         
         # Check if header-auto-align is enabled
