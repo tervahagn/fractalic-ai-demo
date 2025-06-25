@@ -38,7 +38,6 @@ Deploy Fractalic instantly to the cloud using our pre-built Docker container:
 # Pull and run anywhere Docker is supported
 docker run -p 3000:3000 -p 8000:8000 -p 8001:8001 ghcr.io/fractalic-ai/fractalic:main
 ```
-```
 
 **Access after deployment:**
 - 🖥️ **Frontend UI**: http://localhost:3000
@@ -68,7 +67,7 @@ docker run -p 3000:3000 -p 8000:8000 -p 8001:8001 ghcr.io/fractalic-ai/fractalic
 | 🌐 **Cloud** | Production, sharing | 1-2 min | Platform account |
 
 ## Tutorial 101 
-Whatch this video with quick project overview and 101 concepts how to use it (picture is clickable YouTube [link](https://www.youtube.com/watch?v=iRqIzmKE8uw))
+Watch this video with quick project overview and 101 concepts how to use it (picture is clickable YouTube [link](https://www.youtube.com/watch?v=iRqIzmKE8uw))
 
 [![Watch the video](https://img.youtube.com/vi/iRqIzmKE8uw/0.jpg)](https://www.youtube.com/watch?v=iRqIzmKE8uw)
 
