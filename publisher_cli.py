@@ -103,7 +103,9 @@ def deploy_application(plugin_manager: PluginManager, args):
         environment_vars=parse_env_vars(args.env or []),
         port_mapping=parse_port_mapping(args.ports or "3000:3000,8000:8000"),
         custom_domain=args.domain,
-        plugin_specific={}
+        plugin_specific={},
+        script_name=getattr(args, 'script_name', ''),
+        script_folder=getattr(args, 'script_folder', '')
     )
     
     # Validate configuration
@@ -238,6 +240,8 @@ Examples:
     deploy_parser.add_argument('--ports', '-p', help='Port mapping (e.g., "3000:3000,8000:8000")')
     deploy_parser.add_argument('--env', '-e', action='append', help='Environment variable (KEY=VALUE)')
     deploy_parser.add_argument('--domain', '-d', help='Custom domain')
+    deploy_parser.add_argument('--script-name', help='Script name (required for docker-registry plugin)')
+    deploy_parser.add_argument('--script-folder', help='Script folder path (required for docker-registry plugin)')
     
     # Generate badges
     subparsers.add_parser('badges', help='Generate README deploy buttons')

@@ -22,7 +22,7 @@ if project_root not in sys.path:
 
 from core.utils import find_available_ai_server_port, generate_ai_server_info
 from ..base_plugin import BasePublishPlugin
-from ..models import PublishRequest, PublishResponse, DeploymentStatus, PluginInfo, DeploymentInfo, PluginInfo, PluginCapability
+from ..models import PublishRequest, PublishResponse, DeploymentStatus, PluginInfo, DeploymentInfo, PluginInfo, PluginCapability, DeploymentConfig, PublishResult, ProgressCallback
 
 
 class DockerRegistryPlugin(BasePublishPlugin):
@@ -41,33 +41,38 @@ class DockerRegistryPlugin(BasePublishPlugin):
             "mcp_manager": 5859  # Internal only
         }
         
-    def validate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate and normalize plugin configuration"""
-        validated = {}
-        
-        # Required fields
-        validated["script_name"] = config.get("script_name", "").strip()
-        if not validated["script_name"]:
-            raise ValueError("script_name is required")
+    def validate_config(self, config: DeploymentConfig) -> tuple[bool, Optional[str]]:
+        """
+        Validate deployment configuration
+        Returns: (is_valid, error_message)
+        """
+        try:
+            # Convert DeploymentConfig to dict for internal processing
+            config_dict = {
+                "script_name": getattr(config, 'script_name', ''),
+                "script_folder": getattr(config, 'script_folder', ''),
+                "container_name": getattr(config, 'container_name', ''),
+                "registry_image": getattr(config, 'registry_image', ''),
+                "platform": getattr(config, 'platform', ''),
+                "ports": getattr(config, 'port_mapping', {}),
+                "include_files": getattr(config, 'include_files', ["*"]),
+                "exclude_patterns": getattr(config, 'exclude_patterns', [
+                    ".git", ".gitignore", "__pycache__", "*.pyc", ".DS_Store",
+                    "node_modules", ".next", ".vscode", "*.log"
+                ])
+            }
             
-        validated["script_folder"] = config.get("script_folder", "").strip()
-        if not validated["script_folder"]:
-            raise ValueError("script_folder is required")
+            # For CLI deployments, we need to prompt for missing required fields
+            if not config_dict["script_name"]:
+                return False, "script_name is required. Please provide --script-name parameter."
+                
+            if not config_dict["script_folder"]:
+                return False, "script_folder is required. Please provide --script-folder parameter."
             
-        # Optional fields with defaults
-        validated["container_name"] = config.get("container_name", f"fractalic-{validated['script_name']}")
-        validated["registry_image"] = config.get("registry_image", f"{self.default_registry}:latest-production")
-        validated["platform"] = config.get("platform", self._detect_platform())
-        
-        # Port mappings
-        validated["ports"] = {**self.default_ports, **config.get("ports", {})}
-        
-        # File handling
-        validated["include_files"] = config.get("include_files", ["*"])
-        validated["exclude_patterns"] = config.get("exclude_patterns", [
-            ".git", ".gitignore", "__pycache__", "*.pyc", ".DS_Store",
-            "node_modules", ".next", ".vscode", "*.log"
-        ])
+            return True, None
+            
+        except Exception as e:
+            return False, f"Configuration validation error: {str(e)}"
         
         # Configuration files
         validated["config_files"] = config.get("config_files", [
@@ -109,6 +114,75 @@ class DockerRegistryPlugin(BasePublishPlugin):
             return result
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Command failed: {' '.join(cmd)}\nError: {e.stderr}")
+    
+    def _run_command_with_output(self, cmd: List[str], cwd: Optional[str] = None, progress_callback=None, timeout: Optional[int] = None) -> subprocess.CompletedProcess:
+        """Run a shell command with real-time output display and optional timeout"""
+        try:
+            if progress_callback:
+                progress_callback(f"🔧 Running: {' '.join(cmd)}", 0)
+            
+            print(f"📝 Executing: {' '.join(cmd)}")
+            
+            # Run with real-time output
+            process = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            import time
+            start_time = time.time()
+            output_lines = []
+            
+            while True:
+                # Check for timeout only if specified
+                if timeout is not None:
+                    current_time = time.time()
+                    if current_time - start_time > timeout:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                        raise RuntimeError(f"Command timed out after {timeout} seconds: {' '.join(cmd)}")
+                
+                # Read output
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                    
+                if output:
+                    output_lines.append(output.strip())
+                    print(f"   {output.strip()}")
+                    
+                    # For docker pull, show progress updates
+                    if 'docker pull' in ' '.join(cmd) and ('Downloading' in output or 'Extracting' in output or 'Pull complete' in output):
+                        if progress_callback:
+                            elapsed = time.time() - start_time
+                            progress_callback(f"📥 Downloading layers... ({elapsed:.0f}s)", 20)
+                
+                # Sleep briefly to prevent busy waiting
+                time.sleep(0.1)
+            
+            return_code = process.poll()
+            if return_code != 0:
+                raise RuntimeError(f"Command failed with return code {return_code}: {' '.join(cmd)}")
+                
+            # Create a result object similar to subprocess.run
+            result = subprocess.CompletedProcess(
+                args=cmd,
+                returncode=return_code,
+                stdout='\n'.join(output_lines),
+                stderr=''
+            )
+            return result
+            
+        except Exception as e:
+            raise RuntimeError(f"Command failed: {' '.join(cmd)}\nError: {str(e)}")
             
     def _pull_base_image(self, config: Dict[str, Any], progress_callback=None) -> None:
         """Pull the pre-built base image from registry"""
@@ -116,24 +190,30 @@ class DockerRegistryPlugin(BasePublishPlugin):
         platform = config["platform"]
         
         if progress_callback:
-            progress_callback("🚀 Starting deployment", "pulling_image", 10)
-            progress_callback(f"📥 Pulling base image: {image} ({platform})", "pulling_image", 15)
+            progress_callback("🚀 Starting deployment", 10)
+            progress_callback(f" Pulling base image: {image} ({platform})", 15)
+        
+        print(f"\n🐳 Checking/pulling Docker image: {image}")
+        print(f"🏗️  Platform: {platform}")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         
         self.logger.info(f"Pulling base image: {image} ({platform})")
         
-        # Pull the image for the specific platform
+        # Docker pull will automatically check if image exists and only download if needed
         cmd = ["docker", "pull", "--platform", platform, image]
-        self._run_command(cmd)
+        self._run_command_with_output(cmd, progress_callback=progress_callback, timeout=None)
         
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         if progress_callback:
-            progress_callback(f"✅ Successfully pulled {image}", "pulling_image", 30)
+            progress_callback(f"✅ Image ready: {image}", 30)
         
-        self.logger.info(f"Successfully pulled {image}")
+        print(f"✅ Image ready: {image}\n")
+        self.logger.info(f"Image ready: {image}")
         
     def _prepare_user_files(self, config: Dict[str, Any], progress_callback=None) -> tempfile.TemporaryDirectory:
         """Prepare user files for copying to container"""
         if progress_callback:
-            progress_callback("📁 Preparing user files", "preparing_files", 35)
+            progress_callback("📁 Preparing user files", 35)
             
         script_folder = Path(config["script_folder"]).resolve()
         if not script_folder.exists():
@@ -150,7 +230,7 @@ class DockerRegistryPlugin(BasePublishPlugin):
         config_dir.mkdir()
         
         if progress_callback:
-            progress_callback("🔄 Copying script files", "preparing_files", 40)
+            progress_callback("🔄 Copying script files", 40)
         
         # Copy script files (excluding patterns)
         self._copy_filtered_files(script_folder, scripts_dir, config["exclude_patterns"])
@@ -159,12 +239,12 @@ class DockerRegistryPlugin(BasePublishPlugin):
         self._copy_config_files(script_folder, config_dir, config["config_files"])
         
         if progress_callback:
-            progress_callback("✅ User files prepared", "preparing_files", 45)
+            progress_callback("✅ User files prepared", 45)
         
         return temp_dir
         
     def _copy_filtered_files(self, src_dir: Path, dst_dir: Path, exclude_patterns: List[str]) -> None:
-        """Copy files from source to destination, excluding patterns"""
+        """Copy files from source to destination, excluding patterns and problematic files"""
         import fnmatch
         
         for root, dirs, files in os.walk(src_dir):
@@ -182,7 +262,18 @@ class DockerRegistryPlugin(BasePublishPlugin):
                     
                 src_file = Path(root) / file
                 dst_file = dst_root / file
-                shutil.copy2(src_file, dst_file)
+                
+                # Skip problematic files that can't be copied (sockets, devices, etc.)
+                try:
+                    if src_file.is_socket() or src_file.is_fifo() or src_file.is_block_device() or src_file.is_char_device():
+                        continue
+                    if not src_file.is_file():
+                        continue
+                    shutil.copy2(src_file, dst_file)
+                except (OSError, PermissionError) as e:
+                    # Skip files that can't be read or copied
+                    self.logger.warning(f"Skipping file {src_file}: {e}")
+                    continue
                 
     def _copy_config_files(self, src_dir: Path, dst_dir: Path, config_files: List[str]) -> None:
         """Copy configuration files if they exist"""
@@ -200,7 +291,7 @@ class DockerRegistryPlugin(BasePublishPlugin):
         platform = config["platform"]
         
         if progress_callback:
-            progress_callback(f"🐳 Starting container: {container_name}", "starting_container", 50)
+            progress_callback(f"🐳 Starting container: {container_name}", 50)
         
         # Stop and remove existing container if it exists
         self._cleanup_container(container_name)
@@ -211,9 +302,9 @@ class DockerRegistryPlugin(BasePublishPlugin):
         if conflict_info:
             if progress_callback:
                 if conflict_info['type'] == 'docker_container':
-                    progress_callback(f"⚠️ Port {conflict_info['port']} in use by container {conflict_info['container']}, using port {ai_port}", "port_detection", 52)
+                    progress_callback(f"⚠️ Port {conflict_info['port']} in use by container {conflict_info['container']}, using port {ai_port}", 52)
                 else:
-                    progress_callback(f"⚠️ Port {conflict_info['port']} in use, using port {ai_port}", "port_detection", 52)
+                    progress_callback(f"⚠️ Port {conflict_info['port']} in use, using port {ai_port}", 52)
         
         # Store the actual ports used
         config["actual_ports"] = {
@@ -235,8 +326,15 @@ class DockerRegistryPlugin(BasePublishPlugin):
         port_mappings = [f"AI Server: {ai_port}→8001 (external)", "Backend: 8000 (internal)", "MCP Manager: 5859 (internal)"]
             
         if progress_callback:
-            progress_callback(f"🔌 Port mappings: {', '.join(port_mappings)}", "starting_container", 55)
+            progress_callback(f"🔌 Port mappings: {', '.join(port_mappings)}", 55)
             
+        print(f"\n🐳 Starting Fractalic container:")
+        print(f"📦 Container name: {container_name}")
+        print(f"🏗️  Image: {image}")
+        print(f"🔌 AI Server port: {ai_port} → 8001")
+        print(f"🔌 Backend (internal): 8000")
+        print(f"🔌 MCP Manager (internal): 5859")
+        
         # Add volume mounts (logs only - user scripts will be copied)
         cmd.extend([
             "-v", f"{os.getcwd()}/logs:/fractalic/logs"
@@ -250,14 +348,21 @@ class DockerRegistryPlugin(BasePublishPlugin):
         cmd.append(image)
         
         if progress_callback:
-            progress_callback("🚀 Launching container", "starting_container", 60)
+            progress_callback("🚀 Launching container", 60)
         
-        # Run the container
-        result = self._run_command(cmd)
-        container_id = result.stdout.strip()
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         
+        # Run the container with output
+        result = self._run_command_with_output(cmd, progress_callback=progress_callback)
+        container_id = result.stdout.strip().split('\n')[-1]  # Get the last line which should be the container ID
+        
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         if progress_callback:
-            progress_callback(f"✅ Container started: {container_id[:12]}", "starting_container", 65)
+            progress_callback(f"✅ Container started: {container_id[:12]}", 65)
+        
+        print(f"✅ Container started: {container_id[:12]}")
+        print(f"🔍 Container logs: docker logs {container_name}")
+        print(f"🛑 Stop container: docker stop {container_name}\n")
         
         self.logger.info(f"Started container: {container_name} ({container_id[:12]})")
         return container_id
@@ -305,52 +410,93 @@ class DockerRegistryPlugin(BasePublishPlugin):
         health_status = {}
         
         if progress_callback:
-            progress_callback("🔍 Performing health checks", "health_check", 90)
+            progress_callback("🔍 Performing health checks", 90)
+        
+        print(f"\n🔍 Performing health checks for container: {container_name}")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         
         # Wait for container to start
+        print("⏳ Waiting 10 seconds for services to initialize...")
         time.sleep(10)
         
         # Check AI server (external service)
         ai_port = config["actual_ports"]["ai_server"]
         if progress_callback:
-            progress_callback(f"🩺 Checking AI server on port {ai_port}", "health_check", 92)
+            progress_callback(f"🩺 Checking AI server on port {ai_port}", 92)
             
+        print(f"\n🩺 Testing AI Server on port {ai_port}:")
+        print(f"   URL: http://localhost:{ai_port}/health")
+        
         try:
             response = requests.get(f"http://localhost:{ai_port}/health", timeout=10)
             health_status["ai_server"] = response.status_code == 200
             if health_status["ai_server"]:
+                print(f"   ✅ AI server is healthy (HTTP {response.status_code})")
                 if progress_callback:
-                    progress_callback(f"✅ AI server is healthy (port {ai_port})", "health_check", 94)
+                    progress_callback(f"✅ AI server is healthy (port {ai_port})", 94)
             else:
+                print(f"   ❌ AI server unhealthy (HTTP {response.status_code})")
                 if progress_callback:
-                    progress_callback(f"❌ AI server unhealthy (HTTP {response.status_code})", "health_check", 94)
+                    progress_callback(f"❌ AI server unhealthy (HTTP {response.status_code})", 94)
         except Exception as e:
             health_status["ai_server"] = False
+            print(f"   ❌ AI server connection failed: {str(e)}")
             if progress_callback:
-                progress_callback(f"❌ AI server connection failed: {str(e)}", "health_check", 94)
+                progress_callback(f"❌ AI server connection failed: {str(e)}", 94)
         
-        # Check backend (internal service via container exec)
-        if progress_callback:
-            progress_callback("🩺 Checking backend (internal)", "health_check", 96)
+        # Check backend (internal service via container exec) - only for full images
+        is_production = "production" in config.get("registry_image", "")
+        if not is_production:
+            if progress_callback:
+                progress_callback("🩺 Checking backend (internal)", 96)
+                
+            print(f"\n🩺 Testing Backend (internal service):")
+            print(f"   URL: http://localhost:8000/health (inside container)")
             
-        try:
-            result = self._run_command([
-                "docker", "exec", container_name, "curl", "-f", "http://localhost:8000/health"
-            ])
-            health_status["backend"] = True
+            try:
+                result = self._run_command([
+                    "docker", "exec", container_name, "curl", "-f", "http://localhost:8000/health"
+                ])
+                health_status["backend"] = True
+                print(f"   ✅ Backend is healthy (internal port 8000)")
+                if progress_callback:
+                    progress_callback("✅ Backend is healthy (internal port 8000)", 98)
+            except RuntimeError as e:
+                health_status["backend"] = False
+                print(f"   ❌ Backend health check failed: {str(e)}")
+                if progress_callback:
+                    progress_callback(f"❌ Backend health check failed: {str(e)}", 98)
+        else:
+            # For production, check MCP manager instead of backend
             if progress_callback:
-                progress_callback("✅ Backend is healthy (internal port 8000)", "health_check", 98)
-        except RuntimeError as e:
-            health_status["backend"] = False
-            if progress_callback:
-                progress_callback(f"❌ Backend health check failed: {str(e)}", "health_check", 98)
+                progress_callback("🩺 Checking MCP manager (production)", 96)
+                
+            print(f"\n🩺 Testing MCP Manager (production service):")
+            print(f"   URL: http://localhost:5859/status (inside container)")
+            
+            try:
+                result = self._run_command([
+                    "docker", "exec", container_name, "curl", "-f", "http://localhost:5859/status"
+                ])
+                health_status["mcp_manager"] = True
+                print(f"   ✅ MCP manager is healthy (internal port 5859)")
+                if progress_callback:
+                    progress_callback("✅ MCP manager is healthy (internal port 5859)", 98)
+            except RuntimeError as e:
+                health_status["mcp_manager"] = False
+                print(f"   ❌ MCP manager health check failed: {str(e)}")
+                if progress_callback:
+                    progress_callback(f"❌ MCP manager health check failed: {str(e)}", 98)
         
         # Summary
         healthy_count = sum(health_status.values())
         total_count = len(health_status)
         
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print(f"📊 Health check summary: {healthy_count}/{total_count} services healthy")
+        
         if progress_callback:
-            progress_callback(f"✅ Health check complete: {healthy_count}/{total_count} services healthy", "health_check", 100)
+            progress_callback(f"✅ Health check complete: {healthy_count}/{total_count} services healthy", 100)
                 
         return health_status
         
@@ -367,80 +513,121 @@ class DockerRegistryPlugin(BasePublishPlugin):
                     mappings[container_port] = host_port
         return mappings
         
-    def publish(self, request: PublishRequest, progress_callback=None) -> PublishResponse:
-        """Main publish method"""
+    def publish(self, source_path: str, config: DeploymentConfig, progress_callback: Optional[ProgressCallback] = None) -> PublishResult:
+        """
+        Publish the application using Docker registry
+        
+        Args:
+            source_path: Path to the Fractalic source code
+            config: Deployment configuration
+            progress_callback: Optional callback for progress updates
+            
+        Returns:
+            PublishResult with deployment information
+        """
         try:
             if progress_callback:
-                progress_callback("🚀 Starting Docker registry deployment", "validating", 5)
+                progress_callback("🚀 Starting Docker registry deployment", 5)
                 
-            self.logger.info(f"Starting Docker registry deployment: {request.config.get('script_name')}")
+            self.logger.info(f"Starting Docker registry deployment: {config.script_name}")
             
             # Validate configuration
-            config = self.validate_config(request.config)
+            is_valid, error_msg = self.validate_config(config)
+            if not is_valid:
+                return PublishResult(
+                    success=False,
+                    deployment_id="",
+                    message="Configuration validation failed",
+                    error=error_msg
+                )
+            
+            # Convert DeploymentConfig to internal config dict
+            config_dict = {
+                "script_name": config.script_name,
+                "script_folder": config.script_folder,
+                "container_name": config.container_name,
+                "registry_image": f"{self.default_registry}:latest-production",
+                "platform": self._detect_platform(),
+                "ports": self.default_ports,
+                "include_files": ["*"],
+                "exclude_patterns": [
+                    ".git", ".gitignore", "__pycache__", "*.pyc", ".DS_Store",
+                    "node_modules", ".next", ".vscode", "*.log"
+                ],
+                "config_files": ["config.json", "settings.toml", ".env"],
+                "env_vars": {},
+                "mount_paths": {
+                    "user_scripts": "/payload",
+                    "logs": "/fractalic/logs"
+                }
+            }
             
             # Pull base image
-            self._pull_base_image(config, progress_callback)
+            self._pull_base_image(config_dict, progress_callback)
             
             # Prepare user files
-            with self._prepare_user_files(config, progress_callback) as temp_dir:
+            with self._prepare_user_files(config_dict, progress_callback) as temp_dir:
                 # Start container
-                container_id = self._start_container(config, temp_dir, progress_callback)
+                container_id = self._start_container(config_dict, temp_dir, progress_callback)
                 
                 # Copy files into container (cloud-ready approach)
-                self._copy_files_to_container(config["container_name"], temp_dir, config, progress_callback)
+                self._copy_files_to_container(config_dict["container_name"], temp_dir, config_dict, progress_callback)
                 
                 # Health check
-                health_status = self._health_check(config, progress_callback)
+                health_status = self._health_check(config_dict, progress_callback)
                 
                 # Generate AI server information
-                ai_port = config["actual_ports"]["ai_server"]
-                ai_server_info = generate_ai_server_info(ai_port, config["container_name"])
+                ai_port = config_dict["actual_ports"]["ai_server"]
+                ai_server_info = generate_ai_server_info(ai_port, config_dict["container_name"])
                 
                 # Build URLs (focused on AI server as main service)
                 urls = {
                     "ai_server": ai_server_info["url"]
                 }
                 
-                success = health_status.get("ai_server", False) and health_status.get("backend", False)
+                # Determine success criteria based on deployment type
+                is_production = "production" in config_dict.get("registry_image", "")
+                if is_production:
+                    # For production: AI server + MCP manager
+                    success = health_status.get("ai_server", False) and health_status.get("mcp_manager", False)
+                    service_status = f"AI Server: {'✅' if health_status.get('ai_server') else '❌'}, MCP Manager: {'✅' if health_status.get('mcp_manager') else '❌'}"
+                else:
+                    # For full: AI server + backend
+                    success = health_status.get("ai_server", False) and health_status.get("backend", False)
+                    service_status = f"AI Server: {'✅' if health_status.get('ai_server') else '❌'}, Backend: {'✅' if health_status.get('backend') else '❌'}"
                 
                 # Generate deployment summary message
                 if success:
                     message = f"✅ Fractalic AI Server deployed successfully!\n\n"
                     message += f"🌐 AI Server: {ai_server_info['url']}\n"
                     message += f"📝 Execute script: {ai_server_info['sample_curl']}\n\n"
-                    message += f"🐳 Container: {config['container_name']}\n"
+                    message += f"🐳 Container: {config_dict['container_name']}\n"
                     message += f"🛑 Stop: {ai_server_info['stop_command']}\n"
                     message += f"🗑️ Remove: {ai_server_info['remove_command']}"
+                    if is_production:
+                        message += f"\n🔧 MCP Manager: http://localhost:5859/status"
                 else:
-                    message = f"⚠️ Deployment completed with issues. AI Server: {'✅' if health_status.get('ai_server') else '❌'}, Backend: {'✅' if health_status.get('backend') else '❌'}"
+                    message = f"⚠️ Deployment completed with issues. {service_status}"
                 
-                return PublishResponse(
+                return PublishResult(
                     success=success,
-                    message=message,
-                    endpoint_url=ai_server_info["url"],
                     deployment_id=container_id[:12],
-                    metadata={
-                        "container_name": config["container_name"],
-                        "container_id": container_id,
-                        "urls": urls,
-                        "ai_server_info": ai_server_info,
-                        "health_status": health_status,
-                        "platform": config["platform"],
-                        "deployed_at": datetime.now().isoformat(),
-                        "deployment_type": "production_ai_server"
-                    }
+                    message=message,
+                    url=ai_server_info["url"],
+                    admin_url=None,
+                    build_time=None,
+                    error=None if success else "Health check failed"
                 )
                 
         except Exception as e:
             if progress_callback:
-                progress_callback(f"❌ Deployment failed: {str(e)}", "error", 100)
+                progress_callback(f"❌ Deployment failed: {str(e)}", 100)
             self.logger.error(f"Deployment failed: {str(e)}", exc_info=True)
-            return PublishResponse(
+            return PublishResult(
                 success=False,
-                message=f"Deployment failed: {str(e)}",
-                endpoint_url="",
                 deployment_id="",
-                metadata={"error": str(e)}
+                message=f"Deployment failed: {str(e)}",
+                error=str(e)
             )
             
     def get_status(self, deployment_id: str) -> DeploymentStatus:
@@ -569,11 +756,15 @@ class DockerRegistryPlugin(BasePublishPlugin):
         config_path = temp_path / "config"
         
         if progress_callback:
-            progress_callback("📂 Setting up container directories", "copying_files", 70)
+            progress_callback("📂 Setting up container directories", 70)
+        
+        print(f"\n📂 Setting up directories in container:")
         
         # Ensure payload directory exists in container (run as root)
         payload_base = config['mount_paths']['user_scripts']
         payload_path = f"{payload_base}/{config['script_name']}"
+        
+        print(f"📁 Creating payload directory: {payload_path}")
         
         # Create the base payload directory as root if it doesn't exist
         self._run_command([
@@ -588,7 +779,9 @@ class DockerRegistryPlugin(BasePublishPlugin):
         ])
         
         if progress_callback:
-            progress_callback("📄 Copying user scripts to container", "copying_files", 75)
+            progress_callback("📄 Copying user scripts to container", 75)
+        
+        print(f"📄 Copying user scripts to container:")
         
         # Copy all files from scripts directory to container
         file_count = 0
@@ -618,10 +811,10 @@ class DockerRegistryPlugin(BasePublishPlugin):
             file_list = ", ".join(copied_files[:5])  # Show first 5 files
             if len(copied_files) > 5:
                 file_list += f" (and {len(copied_files) - 5} more)"
-            progress_callback(f"📄 Copied {file_count} user files: {file_list}", "copying_files", 78)
+            progress_callback(f"📄 Copied {file_count} user files: {file_list}", 78)
 
         if progress_callback:
-            progress_callback(f"⚙️ Copying configuration files ({file_count} items copied)", "copying_files", 80)
+            progress_callback(f"⚙️ Copying configuration files ({file_count} items copied)", 80)
 
         # Copy configuration files from main directory to /fractalic
         main_config_files = ["mcp_servers.json", "settings.toml"]
@@ -645,7 +838,7 @@ class DockerRegistryPlugin(BasePublishPlugin):
                     self.logger.info(f"Copied {config_file} to root directory for backend compatibility")
         
         if progress_callback:
-            progress_callback("✅ All files copied successfully", "copying_files", 85)
+            progress_callback("✅ All files copied successfully", 85)
         
         # Also copy configuration files from temp directory if they exist
         if config_path.exists():
@@ -714,23 +907,27 @@ class DockerRegistryPlugin(BasePublishPlugin):
         except RuntimeError:
             pass  # File might not exist
         
-        # Fix the frontend config.json to have correct API endpoints
-        if progress_callback:
-            progress_callback("⚙️ Configuring frontend for container networking", "configuring", 82)
-        self._fix_frontend_config(container_name, config)
-        
-        # Fix the Next.js config for proper API rewrites
-        if progress_callback:
-            progress_callback("⚙️ Setting up Next.js API rewrites", "configuring", 84)
-        self._fix_nextjs_config(container_name, config)
-        
-        # Fix frontend environment variables for container networking
-        if progress_callback:
-            progress_callback("⚙️ Setting frontend environment variables", "configuring", 86)
-        self._fix_frontend_environment(container_name, config)
-        
-        # Restart frontend service to apply new configuration
-        self._restart_frontend_service(container_name, progress_callback)
+        # Fix the frontend config.json to have correct API endpoints (only for full images)
+        if "production" not in config.get("registry_image", ""):
+            if progress_callback:
+                progress_callback("⚙️ Configuring frontend for container networking", 82)
+            self._fix_frontend_config(container_name, config)
+            
+            # Fix the Next.js config for proper API rewrites
+            if progress_callback:
+                progress_callback("⚙️ Setting up Next.js API rewrites", 84)
+            self._fix_nextjs_config(container_name, config)
+            
+            # Fix frontend environment variables for container networking
+            if progress_callback:
+                progress_callback("⚙️ Setting frontend environment variables", 86)
+            self._fix_frontend_environment(container_name, config)
+            
+            # Restart frontend service to apply new configuration
+            self._restart_frontend_service(container_name, progress_callback)
+        else:
+            if progress_callback:
+                progress_callback("⚙️ Production image - skipping frontend config", 82)
         
         self.logger.info(f"Successfully copied all files to {payload_path} and config files to /fractalic/")
         
@@ -1002,7 +1199,7 @@ NEXT_PUBLIC_USE_INTERNAL_CONFIG=true
         """Restart the frontend service to pick up new configuration"""
         
         if progress_callback:
-            progress_callback("🔄 Restarting frontend with new config", "configuring", 75)
+            progress_callback("🔄 Restarting frontend with new config", 75)
         
         try:
             # Method 1: Try supervisorctl (if available)
@@ -1012,7 +1209,7 @@ NEXT_PUBLIC_USE_INTERNAL_CONFIG=true
                     "supervisorctl", "restart", "frontend"
                 ])
                 if progress_callback:
-                    progress_callback("✅ Frontend restarted via supervisor", "configuring", 80)
+                    progress_callback("✅ Frontend restarted via supervisor", 80)
                 self.logger.info("Frontend service restarted via supervisor")
                 return
             except RuntimeError:
@@ -1051,11 +1248,11 @@ NEXT_PUBLIC_USE_INTERNAL_CONFIG=true
             time.sleep(8)
             
             if progress_callback:
-                progress_callback("✅ Frontend restarted manually", "configuring", 80)
+                progress_callback("✅ Frontend restarted manually", 80)
                 
             self.logger.info("Frontend service restarted manually")
             
         except Exception as e:
             self.logger.error(f"Failed to restart frontend service: {e}")
             if progress_callback:
-                progress_callback(f"⚠️ Frontend restart failed: {e}", "configuring", 80)
+                progress_callback(f"⚠️ Frontend restart failed: {e}", 80)

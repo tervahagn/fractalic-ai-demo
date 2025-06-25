@@ -55,6 +55,8 @@ class DeploymentConfig:
     scaling_config: Optional[Dict[str, Any]] = None
     plugin_specific: Optional[Dict[str, Any]] = None  # Plugin-specific config
     port_offset: int = 0  # Port offset for avoiding conflicts
+    script_name: Optional[str] = None  # Script name for registry deployments
+    script_folder: Optional[str] = None  # Script folder path for registry deployments
 
 
 @dataclass
