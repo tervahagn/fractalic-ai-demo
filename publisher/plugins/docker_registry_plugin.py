@@ -4,6 +4,7 @@ Deploys user scripts using pre-built Docker images from registry
 """
 
 import os
+import sys
 import json
 import shutil
 import subprocess
@@ -13,6 +14,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
+# Add project root to path for utils import
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from core.utils import find_available_ai_server_port, generate_ai_server_info
 from ..base_plugin import BasePublishPlugin
 from ..models import PublishRequest, PublishResponse, DeploymentStatus, PluginInfo, DeploymentInfo, PluginInfo, PluginCapability
 
@@ -28,10 +36,9 @@ class DockerRegistryPlugin(BasePublishPlugin):
         self.logger = logging.getLogger(__name__)
         self.default_registry = "ghcr.io/fractalic-ai/fractalic"
         self.default_ports = {
-            "frontend": 3000,
-            "backend": 8000,
-            "ai_server": 8001,
-            "mcp_manager": 5859
+            "backend": 8000,  # Internal only
+            "ai_server": 8001,  # External - main service
+            "mcp_manager": 5859  # Internal only
         }
         
     def validate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -49,7 +56,7 @@ class DockerRegistryPlugin(BasePublishPlugin):
             
         # Optional fields with defaults
         validated["container_name"] = config.get("container_name", f"fractalic-{validated['script_name']}")
-        validated["registry_image"] = config.get("registry_image", f"{self.default_registry}:latest")
+        validated["registry_image"] = config.get("registry_image", f"{self.default_registry}:latest-production")
         validated["platform"] = config.get("platform", self._detect_platform())
         
         # Port mappings
@@ -187,7 +194,7 @@ class DockerRegistryPlugin(BasePublishPlugin):
                 self.logger.info(f"Copied config file: {config_file}")
                 
     def _start_container(self, config: Dict[str, Any], temp_dir: str, progress_callback=None) -> str:
-        """Start the Docker container with user files mounted"""
+        """Start the Docker container with automatic port detection"""
         container_name = config["container_name"]
         image = config["registry_image"]
         platform = config["platform"]
@@ -198,6 +205,23 @@ class DockerRegistryPlugin(BasePublishPlugin):
         # Stop and remove existing container if it exists
         self._cleanup_container(container_name)
         
+        # Find available AI server port (main external service)
+        ai_port, conflict_info = find_available_ai_server_port(config["ports"]["ai_server"])
+        
+        if conflict_info:
+            if progress_callback:
+                if conflict_info['type'] == 'docker_container':
+                    progress_callback(f"⚠️ Port {conflict_info['port']} in use by container {conflict_info['container']}, using port {ai_port}", "port_detection", 52)
+                else:
+                    progress_callback(f"⚠️ Port {conflict_info['port']} in use, using port {ai_port}", "port_detection", 52)
+        
+        # Store the actual ports used
+        config["actual_ports"] = {
+            "ai_server": ai_port,
+            "backend": 8000,  # Internal only, no mapping needed
+            "mcp_manager": 5859  # Internal only, no mapping needed
+        }
+        
         # Build docker run command
         cmd = [
             "docker", "run", "-d",
@@ -205,14 +229,10 @@ class DockerRegistryPlugin(BasePublishPlugin):
             "--platform", platform
         ]
         
-        # Add port mappings
-        used_ports = set()
-        port_mappings = []
-        for service, port in config["ports"].items():
-            host_port = self._find_available_port(port, used_ports)
-            used_ports.add(host_port)
-            cmd.extend(["-p", f"{host_port}:{port}"])
-            port_mappings.append(f"{service}: {host_port}→{port}")
+        # Add port mappings - only expose AI server externally
+        cmd.extend(["-p", f"{ai_port}:8001"])  # AI server (main service)
+        
+        port_mappings = [f"AI Server: {ai_port}→8001 (external)", "Backend: 8000 (internal)", "MCP Manager: 5859 (internal)"]
             
         if progress_callback:
             progress_callback(f"🔌 Port mappings: {', '.join(port_mappings)}", "starting_container", 55)
@@ -277,7 +297,7 @@ class DockerRegistryPlugin(BasePublishPlugin):
             pass  # Container might not exist
             
     def _health_check(self, config: Dict[str, Any], progress_callback=None) -> Dict[str, bool]:
-        """Check if all services in the container are healthy"""
+        """Check if AI server and backend services are healthy (production mode)"""
         import time
         import requests
         
@@ -290,67 +310,47 @@ class DockerRegistryPlugin(BasePublishPlugin):
         # Wait for container to start
         time.sleep(10)
         
-        # Get container port mappings
+        # Check AI server (external service)
+        ai_port = config["actual_ports"]["ai_server"]
+        if progress_callback:
+            progress_callback(f"🩺 Checking AI server on port {ai_port}", "health_check", 92)
+            
+        try:
+            response = requests.get(f"http://localhost:{ai_port}/health", timeout=10)
+            health_status["ai_server"] = response.status_code == 200
+            if health_status["ai_server"]:
+                if progress_callback:
+                    progress_callback(f"✅ AI server is healthy (port {ai_port})", "health_check", 94)
+            else:
+                if progress_callback:
+                    progress_callback(f"❌ AI server unhealthy (HTTP {response.status_code})", "health_check", 94)
+        except Exception as e:
+            health_status["ai_server"] = False
+            if progress_callback:
+                progress_callback(f"❌ AI server connection failed: {str(e)}", "health_check", 94)
+        
+        # Check backend (internal service via container exec)
+        if progress_callback:
+            progress_callback("🩺 Checking backend (internal)", "health_check", 96)
+            
         try:
             result = self._run_command([
-                "docker", "port", container_name
+                "docker", "exec", container_name, "curl", "-f", "http://localhost:8000/health"
             ])
-            port_mappings = self._parse_port_mappings(result.stdout)
-        except RuntimeError:
+            health_status["backend"] = True
             if progress_callback:
-                progress_callback("❌ Failed to get port mappings", "health_check", 90)
-            return {"container": False}
-            
-        # Check each service
-        services_to_check = {
-            "frontend": 3000,
-            "backend": 8000,
-            "ai_server": 8001,
-            "mcp_manager": 5859
-        }
-        
-        healthy_services = []
-        unhealthy_services = []
-        total_services = len(services_to_check)
-        
-        for i, (service, container_port) in enumerate(services_to_check.items()):
+                progress_callback("✅ Backend is healthy (internal port 8000)", "health_check", 98)
+        except RuntimeError as e:
+            health_status["backend"] = False
             if progress_callback:
-                progress = 90 + (i + 1) * 2  # 90-98%
-                progress_callback(f"🩺 Checking {service}", "health_check", progress)
-                
-            host_port = port_mappings.get(container_port)
-            if host_port:
-                try:
-                    response = requests.get(f"http://localhost:{host_port}", timeout=5)
-                    is_healthy = response.status_code in [200, 404]  # 404 is OK for some endpoints
-                    health_status[service] = is_healthy
-                    if is_healthy:
-                        healthy_services.append(service)
-                        if progress_callback:
-                            progress_callback(f"✅ {service} is healthy (port {host_port})", "health_check", progress)
-                    else:
-                        unhealthy_services.append(f"{service} (HTTP {response.status_code})")
-                        if progress_callback:
-                            progress_callback(f"❌ {service} unhealthy (HTTP {response.status_code})", "health_check", progress)
-                except Exception as e:
-                    health_status[service] = False
-                    unhealthy_services.append(f"{service} (connection failed)")
-                    if progress_callback:
-                        progress_callback(f"❌ {service} connection failed", "health_check", progress)
-            else:
-                health_status[service] = False
-                unhealthy_services.append(f"{service} (no port mapping)")
-                if progress_callback:
-                    progress_callback(f"❌ {service} no port mapping", "health_check", progress)
-                
-        # Detailed health check summary
+                progress_callback(f"❌ Backend health check failed: {str(e)}", "health_check", 98)
+        
+        # Summary
+        healthy_count = sum(health_status.values())
+        total_count = len(health_status)
+        
         if progress_callback:
-            healthy_list = ", ".join(healthy_services) if healthy_services else "none"
-            unhealthy_list = ", ".join(unhealthy_services) if unhealthy_services else "none"
-            progress_callback(f"✅ Health check complete: {len(healthy_services)}/{total_services} services healthy", "health_check", 98)
-            progress_callback(f"   Healthy: {healthy_list}", "health_check", 99)
-            if unhealthy_services:
-                progress_callback(f"   Unhealthy: {unhealthy_list}", "health_check", 100)
+            progress_callback(f"✅ Health check complete: {healthy_count}/{total_count} services healthy", "health_check", 100)
                 
         return health_status
         
@@ -392,38 +392,42 @@ class DockerRegistryPlugin(BasePublishPlugin):
                 # Health check
                 health_status = self._health_check(config, progress_callback)
                 
-                # Get port mappings for response
-                result = self._run_command(["docker", "port", config["container_name"]])
-                port_mappings = self._parse_port_mappings(result.stdout)
+                # Generate AI server information
+                ai_port = config["actual_ports"]["ai_server"]
+                ai_server_info = generate_ai_server_info(ai_port, config["container_name"])
                 
-                # Build URLs
-                urls = {}
-                service_ports = {
-                    "frontend": 3000,
-                    "backend": 8000,
-                    "ai_server": 8001,
-                    "mcp_manager": 5859
+                # Build URLs (focused on AI server as main service)
+                urls = {
+                    "ai_server": ai_server_info["url"]
                 }
                 
-                for service, container_port in service_ports.items():
-                    host_port = port_mappings.get(container_port)
-                    if host_port:
-                        urls[service] = f"http://localhost:{host_port}"
+                success = health_status.get("ai_server", False) and health_status.get("backend", False)
                 
-                success = all(health_status.values())
+                # Generate deployment summary message
+                if success:
+                    message = f"✅ Fractalic AI Server deployed successfully!\n\n"
+                    message += f"🌐 AI Server: {ai_server_info['url']}\n"
+                    message += f"📝 Execute script: {ai_server_info['sample_curl']}\n\n"
+                    message += f"🐳 Container: {config['container_name']}\n"
+                    message += f"🛑 Stop: {ai_server_info['stop_command']}\n"
+                    message += f"🗑️ Remove: {ai_server_info['remove_command']}"
+                else:
+                    message = f"⚠️ Deployment completed with issues. AI Server: {'✅' if health_status.get('ai_server') else '❌'}, Backend: {'✅' if health_status.get('backend') else '❌'}"
                 
                 return PublishResponse(
                     success=success,
-                    message=f"Deployment {'completed successfully' if success else 'completed with some issues'}",
-                    endpoint_url=urls.get("frontend", ""),
+                    message=message,
+                    endpoint_url=ai_server_info["url"],
                     deployment_id=container_id[:12],
                     metadata={
                         "container_name": config["container_name"],
                         "container_id": container_id,
                         "urls": urls,
+                        "ai_server_info": ai_server_info,
                         "health_status": health_status,
                         "platform": config["platform"],
-                        "deployed_at": datetime.now().isoformat()
+                        "deployed_at": datetime.now().isoformat(),
+                        "deployment_type": "production_ai_server"
                     }
                 )
                 

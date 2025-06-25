@@ -1,0 +1,59 @@
+# Production Dockerfile for AI Server Only
+# This creates a lightweight container with only the Fractalic AI server
+# No UI dependencies, optimized for production deployment
+
+FROM python:3.11-slim
+
+# Install system dependencies (minimal set)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    supervisor && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user
+RUN useradd -m appuser
+
+# Copy backend code to /fractalic directory
+COPY fractalic/ /fractalic/
+
+# Install Python dependencies
+WORKDIR /fractalic
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create necessary directories and set ownership
+RUN mkdir -p /fractalic/logs /payload && \
+    chown -R appuser:appuser /fractalic /payload && \
+    chmod -R 755 /fractalic/logs /payload
+
+# Copy production supervisor configuration
+COPY fractalic/docker/supervisord-production.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Set PYTHONPATH environment variable
+ENV PYTHONPATH=/fractalic
+
+# Switch to the non-root user
+USER appuser
+
+# Expose only the AI server port (8001) and backend for internal use (8000)
+EXPOSE 8001 8000
+
+# Create an entrypoint script for proper initialization
+RUN echo '#!/bin/bash\n\
+echo "🚀 Starting Fractalic AI Server (Production Mode)..."\n\
+echo "📍 Working directory: $(pwd)"\n\
+echo "👤 User: $(whoami)"\n\
+echo "🔗 AI Server will be available on port 8001"\n\
+echo "🔒 Backend server internal-only on port 8000"\n\
+echo "📝 Logs location: /tmp/"\n\
+exec supervisord -c /etc/supervisor/conf.d/supervisord.conf\n\
+' > /fractalic/entrypoint.sh && chmod +x /fractalic/entrypoint.sh
+
+# Health check for AI server
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+# Start with entrypoint script
+CMD ["/fractalic/entrypoint.sh"]

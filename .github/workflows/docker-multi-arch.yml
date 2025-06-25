@@ -18,6 +18,18 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        build_type: [full, production]
+        include:
+          - build_type: full
+            dockerfile: ./fractalic/docker/Dockerfile.production
+            tags_suffix: ""
+            needs_ui: true
+          - build_type: production
+            dockerfile: ./fractalic/docker/Dockerfile.production-ai-only
+            tags_suffix: "-production"
+            needs_ui: false
 
     steps:
     - name: Checkout Fractalic repository
@@ -27,6 +39,7 @@ jobs:
         submodules: recursive
 
     - name: Checkout Fractalic-UI repository
+      if: matrix.needs_ui
       uses: actions/checkout@v4
       with:
         repository: fractalic-ai/fractalic-ui
@@ -36,29 +49,35 @@ jobs:
 
     - name: Create build context structure
       run: |
-        echo "Setting up build context to match local deployment structure..."
+        echo "Setting up build context for ${{ matrix.build_type }} build..."
         echo "=== Workspace Structure ==="
         ls -la
         echo ""
         echo "=== Fractalic Directory ==="
         ls -la fractalic/ | head -10
         echo ""
-        if [ -d "fractalic-ui" ] && [ -f "fractalic-ui/package.json" ]; then
-          echo "✅ Fractalic-UI directory found with package.json:"
-          ls -la fractalic-ui/ | head -10
-          echo "Package.json exists: $(ls -la fractalic-ui/package.json)"
+        
+        if [[ "${{ matrix.build_type }}" == "full" ]]; then
+          if [ -d "fractalic-ui" ] && [ -f "fractalic-ui/package.json" ]; then
+            echo "✅ Fractalic-UI directory found with package.json:"
+            ls -la fractalic-ui/ | head -10
+            echo "Package.json exists: $(ls -la fractalic-ui/package.json)"
+          else
+            echo "❌ Fractalic-UI directory not found or invalid, build will fail!"
+            echo "This is expected to be a fatal error for full builds."
+            echo "Available directories:"
+            ls -la
+            exit 1
+          fi
         else
-          echo "❌ Fractalic-UI directory not found or invalid, build will fail!"
-          echo "This is expected to be a fatal error for production builds."
-          echo "Available directories:"
-          ls -la
-          exit 1
+          echo "✅ Production build - UI not required"
         fi
+        
         echo ""
         echo "=== Docker Files ==="
         ls -la fractalic/docker/
         echo ""
-        echo "Build context is ready - both fractalic/ and fractalic-ui/ are siblings"
+        echo "Build context is ready for ${{ matrix.build_type }} build"
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -76,38 +95,47 @@ jobs:
       with:
         images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=raw,value=latest,enable={{is_default_branch}}
+          type=ref,event=branch,suffix=${{ matrix.tags_suffix }}
+          type=ref,event=pr,suffix=${{ matrix.tags_suffix }}
+          type=semver,pattern={{version}},suffix=${{ matrix.tags_suffix }}
+          type=semver,pattern={{major}}.{{minor}},suffix=${{ matrix.tags_suffix }}
+          type=raw,value=latest${{ matrix.tags_suffix }},enable={{is_default_branch}}
+          type=raw,value=${{ matrix.build_type }},enable={{is_default_branch}}
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./fractalic/docker/Dockerfile.production
+        file: ${{ matrix.dockerfile }}
         platforms: linux/amd64,linux/arm64
         push: ${{ github.event_name != 'pull_request' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-from: type=gha,scope=${{ matrix.build_type }}
+        cache-to: type=gha,mode=max,scope=${{ matrix.build_type }}
         build-args: |
           BUILDKIT_INLINE_CACHE=1
+          BUILD_TYPE=${{ matrix.build_type }}
 
     - name: Verify multi-arch images were built
       run: |
-        echo "Verifying multi-arch images were built and pushed..."
-        docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        echo "Verifying multi-arch ${{ matrix.build_type }} images were built and pushed..."
+        if [[ "${{ matrix.build_type }}" == "production" ]]; then
+          docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-production
+        else
+          docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        fi
 
   security-scan:
     needs: build-and-push
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image_type: [latest, latest-production]
     steps:
     - name: Run Trivy vulnerability scanner
       uses: aquasecurity/trivy-action@master
       with:
-        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.image_type }}
         format: 'sarif'
-        output: 'trivy-results.sarif'
+        output: 'trivy-results-${{ matrix.image_type }}.sarif'

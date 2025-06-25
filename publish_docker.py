@@ -43,12 +43,20 @@ from pathlib import Path
 import json
 import time
 
+# Import port detection utilities
+from core.utils import find_available_ai_server_port, generate_ai_server_info
+
 class FractalicDockerPublisher:
-    def __init__(self, container_name="fractalic-published", port_offset=0):
+    def __init__(self, container_name="fractalic-published", port_offset=0, mode="production"):
         self.container_name = container_name
         self.port_offset = port_offset
+        self.mode = mode
         self.temp_dir = None
         self.current_dir = Path(__file__).parent.absolute()
+        
+        # Initialize production mode attributes
+        self.ai_server_port = None
+        self.ai_server_info = None
         
         # Host port mappings (internal ports stay fixed)
         # Internal container ports remain: 3000, 8000, 8001, 5859
@@ -736,11 +744,17 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
         """Build Docker image with live output and progress tracking"""
         image_name = f"{self.container_name}:latest"
         
+        # Select appropriate Dockerfile based on mode
+        if self.mode == "production":
+            dockerfile = "Dockerfile.production-ai-only"
+            self.log(f"Building production Docker image (AI server only): {image_name}", "BUILD")
+        else:
+            dockerfile = "Dockerfile.production"
+            self.log(f"Building full Docker image (UI + AI server): {image_name}", "BUILD")
+        
         # Report build context size
         total_size = self.get_directory_size(build_dir)
         self.log(f"Build context size: {total_size:.1f} MB", "BUILD")
-        
-        self.log(f"Building Docker image: {image_name}", "BUILD")
         
         # Show what's in the build directory
         self.log("Build directory contents:", "BUILD")
@@ -754,7 +768,7 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
         
         self.log("=== DOCKER BUILD OUTPUT ===", "BUILD")
         
-        cmd = ["docker", "build", "-t", image_name, str(build_dir)]
+        cmd = ["docker", "build", "-f", dockerfile, "-t", image_name, str(build_dir)]
         start_time = time.time()
         
         # Stream output in real-time with step tracking
@@ -818,23 +832,50 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
         """Run the Docker container with detailed progress"""
         self.log(f"Starting container: {self.container_name}", "BUILD")
         
-        # Build port mapping arguments (host:container)
+        # Handle port mapping based on mode
         port_args = []
-        self.log("Configuring port mappings:", "BUILD")
         
-        for service in self.host_ports.keys():
-            host_port = self.host_ports[service]
-            container_port = self.container_ports[service]
-            port_args.extend(["-p", f"{host_port}:{container_port}"])
-            self.log(f"  {service}: localhost:{host_port} -> container:{container_port}")
-                
-        # Also map additional AI server ports (8002, 8003, 8004)
-        self.log("  Additional AI server ports:")
-        for i in range(2, 5):  # 8002, 8003, 8004
-            host_ai_port = 8000 + i + self.port_offset
-            container_ai_port = 8000 + i
-            port_args.extend(["-p", f"{host_ai_port}:{container_ai_port}"])
-            self.log(f"    AI server {i}: localhost:{host_ai_port} -> container:{container_ai_port}")
+        if self.mode == "production":
+            # Production mode: Only expose AI server externally with auto-detection
+            self.log("Production mode: AI server only with auto-port detection", "BUILD")
+            
+            # Find available port for AI server
+            ai_port, conflict_info = find_available_ai_server_port(8001)
+            
+            if conflict_info:
+                if conflict_info['type'] == 'docker_container':
+                    self.log(f"Port {conflict_info['port']} occupied by container: {conflict_info['container']}", "WARNING")
+                else:
+                    self.log(f"Port {conflict_info['port']} already in use", "WARNING")
+                self.log(f"Using alternative port: {ai_port}", "BUILD")
+            else:
+                self.log(f"Using preferred AI server port: {ai_port}", "BUILD")
+            
+            # Store detected port info for later reporting
+            self.ai_server_port = ai_port
+            self.ai_server_info = generate_ai_server_info(ai_port, self.container_name)
+            
+            # Only map AI server port externally
+            port_args.extend(["-p", f"{ai_port}:8001"])
+            self.log(f"Port mapping: localhost:{ai_port} -> container:8001 (AI server)")
+            
+        else:
+            # Full mode: Map all ports as before
+            self.log("Full mode: All services with configured ports", "BUILD")
+            
+            for service in self.host_ports.keys():
+                host_port = self.host_ports[service]
+                container_port = self.container_ports[service]
+                port_args.extend(["-p", f"{host_port}:{container_port}"])
+                self.log(f"  {service}: localhost:{host_port} -> container:{container_port}")
+                    
+            # Also map additional AI server ports (8002, 8003, 8004)
+            self.log("  Additional AI server ports:")
+            for i in range(2, 5):  # 8002, 8003, 8004
+                host_ai_port = 8000 + i + self.port_offset
+                container_ai_port = 8000 + i
+                port_args.extend(["-p", f"{host_ai_port}:{container_ai_port}"])
+                self.log(f"    AI server {i}: localhost:{host_ai_port} -> container:{container_ai_port}")
         
         cmd = [
             "docker", "run", "-d",
@@ -861,44 +902,72 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
             self.log(f"Initial startup wait: {i}s remaining...")
             time.sleep(1)
         
-        # Check service availability progressively
+        # Check service availability based on mode
         services_status = {}
         max_attempts = 3
         
-        for attempt in range(1, max_attempts + 1):
-            self.log(f"Service check attempt {attempt}/{max_attempts}", "BUILD")
+        if self.mode == "production":
+            # Production mode: Only check AI server
+            self.log("Production mode: Checking AI server health", "BUILD")
             
-            for service in self.host_ports.keys():
-                if service in services_status and "✅" in services_status[service]:
-                    continue  # Skip already confirmed services
-                    
-                host_port = self.host_ports[service]
+            for attempt in range(1, max_attempts + 1):
+                self.log(f"AI server health check attempt {attempt}/{max_attempts}", "BUILD")
+                
                 try:
                     import urllib.request
-                    url = f"http://localhost:{host_port}"
-                    urllib.request.urlopen(url, timeout=3)
-                    services_status[service] = "✅ Available"
-                    self.log(f"   {service}: Available on port {host_port}", "SUCCESS")
+                    health_url = self.ai_server_info['health_url']
+                    urllib.request.urlopen(health_url, timeout=5)
+                    services_status['ai_server'] = "✅ Available"
+                    self.log(f"   AI server: Available on port {self.ai_server_port}", "SUCCESS")
+                    break
                 except Exception as e:
-                    services_status[service] = f"⚠️ Starting (attempt {attempt})"
-                    self.log(f"   {service}: Not yet ready on port {host_port}")
+                    services_status['ai_server'] = f"⚠️ Starting (attempt {attempt})"
+                    self.log(f"   AI server: Not yet ready on port {self.ai_server_port}")
+                    
+                    if attempt < max_attempts:
+                        self.log("Waiting 5s before next check...")
+                        time.sleep(5)
             
-            # Check if all services are ready
-            ready_count = sum(1 for status in services_status.values() if "✅" in status)
-            total_count = len(self.host_ports)
-            self.log(f"Services ready: {ready_count}/{total_count}")
+            # Final check
+            if "⚠️" in services_status.get('ai_server', ''):
+                services_status['ai_server'] = "⚠️ May need more time"
+                
+        else:
+            # Full mode: Check all services as before
+            for attempt in range(1, max_attempts + 1):
+                self.log(f"Service check attempt {attempt}/{max_attempts}", "BUILD")
+                
+                for service in self.host_ports.keys():
+                    if service in services_status and "✅" in services_status[service]:
+                        continue  # Skip already confirmed services
+                        
+                    host_port = self.host_ports[service]
+                    try:
+                        import urllib.request
+                        url = f"http://localhost:{host_port}"
+                        urllib.request.urlopen(url, timeout=3)
+                        services_status[service] = "✅ Available"
+                        self.log(f"   {service}: Available on port {host_port}", "SUCCESS")
+                    except Exception as e:
+                        services_status[service] = f"⚠️ Starting (attempt {attempt})"
+                        self.log(f"   {service}: Not yet ready on port {host_port}")
+                
+                # Check if all services are ready
+                ready_count = sum(1 for status in services_status.values() if "✅" in status)
+                total_count = len(self.host_ports)
+                self.log(f"Services ready: {ready_count}/{total_count}")
+                
+                if ready_count == total_count:
+                    break
+                
+                if attempt < max_attempts:
+                    self.log("Waiting 5s before next check...")
+                    time.sleep(5)
             
-            if ready_count == total_count:
-                break
-            
-            if attempt < max_attempts:
-                self.log("Waiting 5s before next check...")
-                time.sleep(5)
-        
-        # Final status for any remaining services
-        for service in services_status:
-            if "⚠️" in services_status[service]:
-                services_status[service] = "⚠️ May need more time"
+            # Final status for any remaining services
+            for service in services_status:
+                if "⚠️" in services_status[service]:
+                    services_status[service] = "⚠️ May need more time"
                 
         return services_status
         
@@ -939,8 +1008,11 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
             self.log_step(3, total_steps, "Copying Fractalic backend")
             self.copy_fractalic_repo(build_dir)
             
-            self.log_step(4, total_steps, "Copying Fractalic UI frontend")
-            self.copy_or_create_frontend(build_dir)
+            if self.mode == "full":
+                self.log_step(4, total_steps, "Copying Fractalic UI frontend")
+                self.copy_or_create_frontend(build_dir)
+            else:
+                self.log_step(4, total_steps, "Skipping UI frontend (production mode)")
             
             self.log_step(5, total_steps, "Copying Docker configuration")
             self.copy_docker_config(build_dir)
@@ -968,17 +1040,37 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
             self.log("")
             self.log("🎉 Publication completed successfully!", "SUCCESS")
             self.log("")
-            self.log("📋 Services Summary:", "SUCCESS")
-            for service, status in services_status.items():
-                service_name = service.replace('_', ' ').title()
-                host_port = self.host_ports[service]
-                container_port = self.container_ports[service]
-                self.log(f"   • {service_name}: http://localhost:{host_port} -> container:{container_port} - {status}")
-                
-            self.log("")
-            self.log(f"Container name: {self.container_name}", "SUCCESS")
-            self.log(f"Use 'docker logs {self.container_name}' to view logs")
-            self.log(f"Use 'docker stop {self.container_name}' to stop")
+            
+            if self.mode == "production":
+                # Production mode: Focus on AI server
+                self.log("🌐 Fractalic AI Server deployed successfully!", "SUCCESS")
+                self.log("")
+                self.log("📋 AI Server Access:", "SUCCESS")
+                self.log(f"   • AI Server: {self.ai_server_info['url']} - {services_status.get('ai_server', 'Unknown')}")
+                self.log(f"   • Health Check: {self.ai_server_info['health_url']}")
+                self.log(f"   • API Documentation: {self.ai_server_info['docs_url']}")
+                self.log("")
+                self.log("📝 Sample Usage:", "SUCCESS")
+                self.log(f"   {self.ai_server_info['sample_curl']}")
+                self.log("")
+                self.log("🐳 Container Management:", "SUCCESS")
+                self.log(f"   • Container name: {self.container_name}")
+                self.log(f"   • View logs: docker logs {self.container_name}")
+                self.log(f"   • Stop container: docker stop {self.container_name}")
+                self.log(f"   • Remove container: docker rm {self.container_name}")
+            else:
+                # Full mode: Show all services
+                self.log("📋 Services Summary:", "SUCCESS")
+                for service, status in services_status.items():
+                    service_name = service.replace('_', ' ').title()
+                    host_port = self.host_ports[service]
+                    container_port = self.container_ports[service]
+                    self.log(f"   • {service_name}: http://localhost:{host_port} -> container:{container_port} - {status}")
+                    
+                self.log("")
+                self.log(f"Container name: {self.container_name}", "SUCCESS")
+                self.log(f"Use 'docker logs {self.container_name}' to view logs")
+                self.log(f"Use 'docker stop {self.container_name}' to stop")
             
             return True
             
@@ -997,6 +1089,8 @@ def main():
                        help="Container name (default: fractalic-published)")
     parser.add_argument("--port-offset", type=int, default=0,
                        help="Port offset for all services (default: 0)")
+    parser.add_argument("--mode", choices=["full", "production"], default="production",
+                       help="Build mode: 'full' includes UI, 'production' is AI server only (default: production)")
     parser.add_argument("--keep-temp", action="store_true",
                        help="Keep temporary build directory for debugging")
     
@@ -1004,7 +1098,8 @@ def main():
     
     publisher = FractalicDockerPublisher(
         container_name=args.name,
-        port_offset=args.port_offset
+        port_offset=args.port_offset,
+        mode=args.mode
     )
     
     if args.keep_temp:

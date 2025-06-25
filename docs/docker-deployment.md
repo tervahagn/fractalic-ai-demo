@@ -4,46 +4,62 @@ This comprehensive guide covers Fractalic Docker deployment scenarios and the pu
 
 ## 🚀 Deployment Scenarios
 
-Fractalic supports THREE different deployment approaches:
+Fractalic supports THREE different deployment approaches with two build modes:
+
+### Build Modes
+
+- **Production Mode (Default)**: AI server only, no UI, lightweight, production-ready
+- **Full Mode**: Complete setup with UI, backend, and AI server for development
 
 ### 🆕 Fresh Installation from GitHub (New Users)
 
 Perfect for users who want to try Fractalic without any existing setup:
 
 ```bash
-# Create empty directory and run
+# Production deployment (AI server only, recommended)
 mkdir my-fractalic && cd my-fractalic
 curl -s https://raw.githubusercontent.com/fractalic-ai/fractalic/main/docker_build_run.sh | bash
+
+# Full deployment with UI (development/testing)
+mkdir my-fractalic && cd my-fractalic
+curl -s https://raw.githubusercontent.com/fractalic-ai/fractalic/main/docker_build_run.sh | bash -s full
 ```
 
 **What this does:**
 - Checks for empty directory (safety)
-- Clones fractalic and fractalic-ui from GitHub
+- Clones fractalic and fractalic-ui from GitHub (if needed)
 - Creates temporary build context
-- Builds and runs Docker container
+- Builds and runs Docker container with auto-port detection
 - Cleans up temporary files
+- Returns AI server URL and sample curl command
 
 ### 🔧 Deploy Existing Installation (Developers/Custom Content)
 
 For developers with existing Fractalic installations containing custom tutorials, scripts, or modifications:
 
 ```bash
-# From your existing fractalic directory
-python publish_docker.py
+# Production deployment (AI server only, recommended)
+python publish_docker.py --mode production
+
+# Full deployment with UI (development/testing)
+python publish_docker.py --mode full
+
+# Custom container name and port handling
+python publish_docker.py --name my-fractalic --mode production
 ```
 
 **What this does:**
 - Uses your current installation with all customizations
 - Includes your tutorials, scripts, and modifications
-- Deploys to Docker with proper networking
-- Supports additional content inclusion
+- Deploys to Docker with automatic port detection
+- Supports both production and full deployment modes
 
 ### ☁️ Cloud-Ready Registry Deployment (Production/Cloud)
 
 For production deployments using pre-built Docker images from the registry:
 
 ```bash
-# Deploy user scripts to a pre-built container
+# Deploy user scripts to a pre-built production container
 python publisher_cli.py deploy-docker-registry \
   --script-name hello-world-test \
   --script-folder tutorials/01_Basics/hello-world \
@@ -51,7 +67,7 @@ python publisher_cli.py deploy-docker-registry \
 ```
 
 **What this does:**
-- Pulls pre-built image from container registry (ghcr.io/fractalic-ai/fractalic:latest)
+- Pulls pre-built image from container registry (ghcr.io/fractalic-ai/fractalic:latest-production)
 - Deploys user scripts into running container (no volume mounts)
 - Copies config files (settings.toml, mcp_servers.json) into container
 - Ensures proper API endpoints and networking
@@ -59,13 +75,50 @@ python publisher_cli.py deploy-docker-registry \
 
 ---
 
-## 📁 Expected Directory Structure
+## 🔧 Production Deployment Features
 
-### For Existing Installation Deployment
+### Automatic Port Detection
 
+Fractalic automatically detects available ports to avoid conflicts:
+
+- **Default AI Server Port**: 8001
+- **Auto-increment**: If 8001 is occupied, tries 8002, 8003, etc.
+- **Docker Container Detection**: Checks for existing Docker containers using the same ports
+- **System Port Availability**: Verifies ports are not in use by other processes
+
+Example output:
+```bash
+⚠️ Port 8001 occupied by container: fractalic-old
+🏗️ Using alternative port: 8003
+✅ Fractalic AI Server deployed successfully!
+
+🌐 AI Server: http://localhost:8003
+📝 Execute script: curl -X POST http://localhost:8003/execute -H "Content-Type: application/json" -d '{"filename": "/payload/script.md"}'
 ```
-your-workspace/
-├── fractalic/              (your main fractalic repo with custom content)
+
+### Production vs Full Mode
+
+| Feature | Production Mode | Full Mode |
+|---------|----------------|-----------|
+| **Size** | ~800MB | ~1.2GB |
+| **Startup Time** | ~15 seconds | ~30 seconds |
+| **External Ports** | AI Server only (8001+) | All services (3000, 8000, 8001, 5859) |
+| **UI Access** | None (API only) | Full web interface |
+| **Use Case** | Production/Cloud/API | Development/Testing |
+| **Security** | Minimal attack surface | Full development environment |
+
+### Container Images
+
+```bash
+# Production images (recommended for deployment)
+ghcr.io/fractalic-ai/fractalic:latest-production  # Latest production build
+ghcr.io/fractalic-ai/fractalic:production         # Production tag
+
+# Full images (for development)
+ghcr.io/fractalic-ai/fractalic:latest             # Latest full build  
+ghcr.io/fractalic-ai/fractalic:full               # Full tag
+```
+
 ---
 
 ## 📁 Expected Directory Structure
