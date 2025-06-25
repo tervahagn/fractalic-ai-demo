@@ -803,52 +803,96 @@ const nextConfig = {
   // Docker deployment: Use rewrites to proxy API calls to internal services
   async rewrites() {
     return [
-      // Backend API rewrites
+      // Backend API rewrites with query parameter support
+      {
+        source: '/list_directory/:path*',
+        destination: 'http://localhost:8000/list_directory/:path*',
+      },
       {
         source: '/list_directory',
-        destination: 'http://localhost:8000/list_directory',
+        destination: 'http://localhost:8000/list_directory/',
+      },
+      {
+        source: '/branches_and_commits/:path*',
+        destination: 'http://localhost:8000/branches_and_commits/:path*',
       },
       {
         source: '/branches_and_commits',
         destination: 'http://localhost:8000/branches_and_commits',
       },
       {
+        source: '/get_file_content_disk/:path*',
+        destination: 'http://localhost:8000/get_file_content_disk/:path*',
+      },
+      {
         source: '/get_file_content_disk',
         destination: 'http://localhost:8000/get_file_content_disk',
+      },
+      {
+        source: '/create_file/:path*',
+        destination: 'http://localhost:8000/create_file/:path*',
       },
       {
         source: '/create_file',
         destination: 'http://localhost:8000/create_file',
       },
       {
+        source: '/create_folder/:path*',
+        destination: 'http://localhost:8000/create_folder/:path*',
+      },
+      {
         source: '/create_folder',
         destination: 'http://localhost:8000/create_folder',
+      },
+      {
+        source: '/get_file_content/:path*',
+        destination: 'http://localhost:8000/get_file_content/:path*',
       },
       {
         source: '/get_file_content',
         destination: 'http://localhost:8000/get_file_content',
       },
       {
+        source: '/save_file/:path*',
+        destination: 'http://localhost:8000/save_file/:path*',
+      },
+      {
         source: '/save_file',
         destination: 'http://localhost:8000/save_file',
+      },
+      {
+        source: '/delete_item/:path*',
+        destination: 'http://localhost:8000/delete_item/:path*',
       },
       {
         source: '/delete_item',
         destination: 'http://localhost:8000/delete_item',
       },
       {
+        source: '/rename_item/:path*',
+        destination: 'http://localhost:8000/rename_item/:path*',
+      },
+      {
         source: '/rename_item',
         destination: 'http://localhost:8000/rename_item',
+      },
+      {
+        source: '/load_settings/:path*',
+        destination: 'http://localhost:8000/load_settings/:path*',
       },
       {
         source: '/load_settings',
         destination: 'http://localhost:8000/load_settings',
       },
       {
+        source: '/save_settings/:path*',
+        destination: 'http://localhost:8000/save_settings/:path*',
+      },
+      {
         source: '/save_settings',
         destination: 'http://localhost:8000/save_settings',
       },
-      // MCP Manager API rewrites - this is the key fix!
+      // MCP Manager API rewrites
       {
         source: '/mcp/:path*',
         destination: 'http://localhost:5859/:path*',
@@ -913,13 +957,14 @@ export default nextConfig;
     def _fix_frontend_environment(self, container_name: str, config: Dict[str, Any]) -> None:
         """Set proper environment variables for container-internal networking"""
         
-        # Create .env.local with INTERNAL container networking URLs
-        env_content = '''# Container internal networking - DO NOT use host-mapped ports
-NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
-NEXT_PUBLIC_AI_API_BASE_URL=http://localhost:8001  
-NEXT_PUBLIC_MCP_API_BASE_URL=http://localhost:5859
+        # Create .env.local with relative URLs for container networking
+        # Using empty strings to force relative URLs that work with Next.js rewrites
+        env_content = '''# Container internal networking - use relative URLs with Next.js rewrites
+NEXT_PUBLIC_API_BASE_URL=
+NEXT_PUBLIC_AI_API_BASE_URL=/ai  
+NEXT_PUBLIC_MCP_API_BASE_URL=/mcp
 
-# Disable external config fetching if needed
+# Disable external config fetching
 NEXT_PUBLIC_USE_INTERNAL_CONFIG=true
 '''
         
