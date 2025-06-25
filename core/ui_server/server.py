@@ -16,7 +16,7 @@ import subprocess
 import signal
 import aiohttp
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # --- Robust import for ToolRegistry regardless of working directory ---
 import sys
@@ -843,11 +843,49 @@ async def get_info():
 # Store active deployments (in production, use a database)
 active_deployments: Dict[str, Dict[str, Any]] = {}
 
+# Store for deployment progress streams
+deployment_streams: Dict[str, List[Dict[str, Any]]] = {}
+
+def validate_docker_registry_request(data: Dict[str, Any]) -> Dict[str, str]:
+    """Validate Docker registry deployment request"""
+    errors = []
+    
+    # Check required fields based on plugin expectations
+    if not data.get("script_name", "").strip():
+        errors.append("script_name is required")
+    
+    if not data.get("script_folder", "").strip():
+        errors.append("script_folder is required") 
+    
+    # Check image info (can come from multiple sources)
+    image_name = data.get("image_name", "").strip()
+    if not image_name:
+        errors.append("image_name is required")
+    
+    # Optional but recommended fields
+    if not data.get("image_tag", "").strip():
+        data["image_tag"] = "latest"  # Set default
+    
+    return errors
+
 @app.post("/api/deploy/docker-registry")
 async def deploy_docker_registry(request: Request):
-    """Deploy using Docker registry with pre-built images"""
+    """Deploy using Docker registry (non-streaming version)"""
+    import uuid
+    from datetime import datetime
+    
     try:
         data = await request.json()
+        
+        # Validate input
+        validation_errors = validate_docker_registry_request(data)
+        if validation_errors:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Validation failed: {', '.join(validation_errors)}"
+            )
+        
+        deployment_id = str(uuid.uuid4())
         
         # Import the plugin manager
         from publisher.plugin_manager import PluginManager
@@ -863,13 +901,13 @@ async def deploy_docker_registry(request: Request):
         # Create publish request
         publish_request = PublishRequest(
             config=data,
-            metadata={"requested_at": time.time()}
+            metadata={"requested_at": time.time(), "deployment_id": deployment_id}
         )
         
-        # Execute deployment
+        # Run deployment (blocking)
         response = docker_plugin.publish(publish_request)
         
-        # Store deployment info
+        # Store deployment info if successful
         if response.success and response.deployment_id:
             active_deployments[response.deployment_id] = {
                 "deployment_id": response.deployment_id,
@@ -887,124 +925,149 @@ async def deploy_docker_registry(request: Request):
             "metadata": response.metadata
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")
 
-@app.get("/api/deploy/status/{deployment_id}")
-async def get_deployment_status(deployment_id: str):
-    """Get the status of a specific deployment"""
+@app.post("/api/deploy/docker-registry/stream")
+async def deploy_docker_registry_with_progress(request: Request):
+    """Deploy using Docker registry with real-time progress streaming via SSE"""
+    import uuid
+    import asyncio
+    import json
+    from datetime import datetime
+    
     try:
-        from publisher.plugin_manager import PluginManager
+        data = await request.json()
         
-        plugin_manager = PluginManager()
-        docker_plugin = plugin_manager.get_plugin("docker-registry")
+        # Validate input upfront - return HTTP error instead of SSE error for validation failures
+        validation_errors = validate_docker_registry_request(data)
+        if validation_errors:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Validation failed: {', '.join(validation_errors)}"
+            )
         
-        if not docker_plugin:
-            raise HTTPException(status_code=500, detail="Docker registry plugin not available")
+        deployment_id = str(uuid.uuid4())
         
-        # Get status from plugin
-        status = docker_plugin.get_status(deployment_id)
+        # Initialize progress tracking
+        deployment_streams[deployment_id] = []
         
-        # Update stored deployment info
-        if deployment_id in active_deployments:
-            active_deployments[deployment_id]["status"] = status.status
-            active_deployments[deployment_id]["last_updated"] = time.time()
-        
-        return {
-            "deployment_id": status.deployment_id,
-            "status": status.status,
-            "is_healthy": status.is_healthy,
-            "last_updated": status.last_updated,
-            "stored_info": active_deployments.get(deployment_id, {})
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get status: {str(e)}")
-
-@app.get("/api/deploy/logs/{deployment_id}")
-async def get_deployment_logs(deployment_id: str, lines: int = Query(100, description="Number of log lines to return")):
-    """Get logs for a specific deployment"""
-    try:
-        import subprocess
-        
-        # Get container logs
-        result = subprocess.run([
-            "docker", "logs", "--tail", str(lines), deployment_id
-        ], capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            return {
+        def progress_callback(message: str, stage: str, progress: int):
+            """Callback to track deployment progress"""
+            progress_data = {
                 "deployment_id": deployment_id,
-                "logs": result.stdout,
-                "error_logs": result.stderr
+                "timestamp": datetime.now().isoformat(),
+                "message": message,
+                "stage": stage,
+                "progress": progress
             }
-        else:
-            raise HTTPException(status_code=404, detail="Deployment not found or logs unavailable")
-            
+            deployment_streams[deployment_id].append(progress_data)
+        
+        async def stream_deployment():
+            """Stream deployment progress to client"""
+            try:
+                # Import the plugin manager
+                from publisher.plugin_manager import PluginManager
+                from publisher.models import PublishRequest
+                
+                # Initialize plugin manager and get Docker registry plugin
+                plugin_manager = PluginManager()
+                docker_plugin = plugin_manager.get_plugin("docker-registry")
+                
+                if not docker_plugin:
+                    yield f"data: {json.dumps({'error': 'Docker registry plugin not available'})}\n\n"
+                    return
+                
+                # Create publish request
+                publish_request = PublishRequest(
+                    config=data,
+                    metadata={"requested_at": time.time(), "deployment_id": deployment_id}
+                )
+                
+                # Start deployment in background
+                loop = asyncio.get_event_loop()
+                
+                def run_deployment():
+                    return docker_plugin.publish(publish_request, progress_callback)
+                
+                # Run deployment in thread pool to avoid blocking
+                deployment_future = loop.run_in_executor(None, run_deployment)
+                
+                # Stream progress updates
+                last_sent_count = 0
+                while not deployment_future.done():
+                    # Send new progress updates
+                    current_progress = deployment_streams.get(deployment_id, [])
+                    for progress_data in current_progress[last_sent_count:]:
+                        yield f"data: {json.dumps(progress_data)}\n\n"
+                    last_sent_count = len(current_progress)
+                    
+                    await asyncio.sleep(0.5)  # Check for updates every 500ms
+                
+                # Get final result
+                response = await deployment_future
+                
+                # Send any remaining progress updates
+                current_progress = deployment_streams.get(deployment_id, [])
+                for progress_data in current_progress[last_sent_count:]:
+                    yield f"data: {json.dumps(progress_data)}\n\n"
+                
+                # Send final result
+                final_result = {
+                    "deployment_id": deployment_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "message": "Deployment completed",
+                    "stage": "completed",
+                    "progress": 100,
+                    "result": {
+                        "success": response.success,
+                        "message": response.message,
+                        "deployment_id": response.deployment_id,
+                        "endpoint_url": response.endpoint_url,
+                        "metadata": response.metadata
+                    }
+                }
+                
+                yield f"data: {json.dumps(final_result)}\n\n"
+                
+                # Store deployment info if successful
+                if response.success and response.deployment_id:
+                    active_deployments[response.deployment_id] = {
+                        "deployment_id": response.deployment_id,
+                        "script_name": data.get("script_name", "unknown"),
+                        "status": "running",
+                        "created_at": time.time(),
+                        "metadata": response.metadata or {}
+                    }
+                
+            except Exception as e:
+                error_data = {
+                    "deployment_id": deployment_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "message": f"Deployment failed: {str(e)}",
+                    "stage": "error",
+                    "progress": 100,
+                    "error": str(e)
+                }
+                yield f"data: {json.dumps(error_data)}\n\n"
+            finally:
+                # Cleanup progress tracking
+                if deployment_id in deployment_streams:
+                    del deployment_streams[deployment_id]
+        
+        return StreamingResponse(
+            stream_deployment(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"  # Disable nginx buffering
+            }
+        )
+        
+    except HTTPException:
+        raise  # Re-raise HTTPExceptions to preserve status codes
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get logs: {str(e)}")
-
-@app.delete("/api/deploy/{deployment_id}")
-async def delete_deployment(deployment_id: str):
-    """Stop and remove a deployment"""
-    try:
-        from publisher.plugin_manager import PluginManager
-        
-        plugin_manager = PluginManager()
-        docker_plugin = plugin_manager.get_plugin("docker-registry")
-        
-        if not docker_plugin:
-            raise HTTPException(status_code=500, detail="Docker registry plugin not available")
-        
-        # Cleanup deployment
-        success = docker_plugin.cleanup(deployment_id)
-        
-        # Remove from active deployments
-        if deployment_id in active_deployments:
-            del active_deployments[deployment_id]
-        
-        return {
-            "success": success,
-            "message": "Deployment removed successfully" if success else "Failed to remove deployment"
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete deployment: {str(e)}")
-
-@app.get("/api/deploy/list")
-async def list_deployments():
-    """List all active deployments"""
-    try:
-        # Update status for all deployments
-        from publisher.plugin_manager import PluginManager
-        
-        plugin_manager = PluginManager()
-        docker_plugin = plugin_manager.get_plugin("docker-registry")
-        
-        if docker_plugin:
-            for deployment_id in list(active_deployments.keys()):
-                try:
-                    status = docker_plugin.get_status(deployment_id)
-                    active_deployments[deployment_id]["status"] = status.status
-                    active_deployments[deployment_id]["is_healthy"] = status.is_healthy
-                except:
-                    # If we can't get status, mark as unknown
-                    active_deployments[deployment_id]["status"] = "unknown"
-                    active_deployments[deployment_id]["is_healthy"] = False
-        
-        return {
-            "deployments": list(active_deployments.values()),
-            "total": len(active_deployments)
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list deployments: {str(e)}")
-
-# ============================================================================
-# Application Lifecycle Management
-# ============================================================================
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up resources on application shutdown"""
-    await cleanup_mcp_manager()
+        raise HTTPException(status_code=500, detail=f"Failed to start deployment: {str(e)}")
