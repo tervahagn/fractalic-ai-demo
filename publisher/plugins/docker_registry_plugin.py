@@ -243,6 +243,25 @@ class DockerRegistryPlugin(BasePublishPlugin):
         
         return temp_dir
         
+    def _find_main_script_file(self, script_name: str, script_folder: str) -> str:
+        """Find the main script file with proper extension"""
+        script_dir = Path(script_folder)
+        possible_extensions = ['.md', '.py', '.sh', '.txt', '']
+        
+        # Look for script_name with various extensions
+        for ext in possible_extensions:
+            script_file = script_dir / f"{script_name}{ext}"
+            if script_file.exists():
+                return f"/payload/{script_name}/{script_name}{ext}"
+        
+        # If no exact match, look for any file that starts with script_name
+        for file in script_dir.glob(f"{script_name}.*"):
+            if file.is_file():
+                return f"/payload/{script_name}/{file.name}"
+        
+        # Default fallback
+        return f"/payload/{script_name}/{script_name}"
+
     def _copy_filtered_files(self, src_dir: Path, dst_dir: Path, exclude_patterns: List[str]) -> None:
         """Copy files from source to destination, excluding patterns and problematic files"""
         import fnmatch
@@ -474,19 +493,27 @@ class DockerRegistryPlugin(BasePublishPlugin):
             print(f"\n🩺 Testing MCP Manager (production service):")
             print(f"   URL: http://localhost:5859/status (inside container)")
             
-            try:
-                result = self._run_command([
-                    "docker", "exec", container_name, "curl", "-f", "http://localhost:5859/status"
-                ])
-                health_status["mcp_manager"] = True
-                print(f"   ✅ MCP manager is healthy (internal port 5859)")
-                if progress_callback:
-                    progress_callback("✅ MCP manager is healthy (internal port 5859)", 98)
-            except RuntimeError as e:
-                health_status["mcp_manager"] = False
-                print(f"   ❌ MCP manager health check failed: {str(e)}")
-                if progress_callback:
-                    progress_callback(f"❌ MCP manager health check failed: {str(e)}", 98)
+            # Retry MCP manager check with backoff (it takes longer to start)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    result = self._run_command([
+                        "docker", "exec", container_name, "curl", "-f", "http://localhost:5859/status"
+                    ])
+                    health_status["mcp_manager"] = True
+                    print(f"   ✅ MCP manager is healthy (internal port 5859)")
+                    if progress_callback:
+                        progress_callback("✅ MCP manager is healthy (internal port 5859)", 98)
+                    break
+                except RuntimeError as e:
+                    if attempt < max_retries - 1:
+                        print(f"   ⏳ MCP manager not ready, retrying in 5 seconds... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(5)
+                    else:
+                        health_status["mcp_manager"] = False
+                        print(f"   ❌ MCP manager health check failed after {max_retries} attempts: {str(e)}")
+                        if progress_callback:
+                            progress_callback(f"❌ MCP manager health check failed: {str(e)}", 98)
         
         # Summary
         healthy_count = sum(health_status.values())
@@ -531,6 +558,9 @@ class DockerRegistryPlugin(BasePublishPlugin):
                 
             self.logger.info(f"Starting Docker registry deployment: {config.script_name}")
             
+            # Store source_path for use in file copying operations
+            self._source_path = source_path
+            
             # Validate configuration
             is_valid, error_msg = self.validate_config(config)
             if not is_valid:
@@ -542,11 +572,26 @@ class DockerRegistryPlugin(BasePublishPlugin):
                 )
             
             # Convert DeploymentConfig to internal config dict
+            # Get image name from plugin_specific config or use default
+            image_name = f"{self.default_registry}:latest-production"
+            if config.plugin_specific and "image_name" in config.plugin_specific:
+                image_name = config.plugin_specific["image_name"]
+                # Force production image for deployments
+                if "fractalic-ai/fractalic" in image_name:
+                    if image_name.endswith(":latest"):
+                        image_name = image_name.replace(":latest", ":latest-production")
+                    elif not image_name.endswith("-production"):
+                        # Add production tag if no tag specified
+                        if ":" not in image_name.split("/")[-1]:
+                            image_name = f"{image_name}:latest-production"
+                        else:
+                            image_name = f"{image_name}-production"
+            
             config_dict = {
                 "script_name": config.script_name,
                 "script_folder": config.script_folder,
                 "container_name": config.container_name,
-                "registry_image": f"{self.default_registry}:latest-production",
+                "registry_image": image_name,
                 "platform": self._detect_platform(),
                 "ports": self.default_ports,
                 "include_files": ["*"],
@@ -576,9 +621,10 @@ class DockerRegistryPlugin(BasePublishPlugin):
                 # Health check
                 health_status = self._health_check(config_dict, progress_callback)
                 
-                # Generate AI server information
+                # Generate AI server information with actual script path
                 ai_port = config_dict["actual_ports"]["ai_server"]
-                ai_server_info = generate_ai_server_info(ai_port, config_dict["container_name"])
+                script_path = self._find_main_script_file(config_dict['script_name'], config_dict['script_folder'])
+                ai_server_info = generate_ai_server_info(ai_port, config_dict["container_name"], script_path)
                 
                 # Build URLs (focused on AI server as main service)
                 urls = {
@@ -598,14 +644,23 @@ class DockerRegistryPlugin(BasePublishPlugin):
                 
                 # Generate deployment summary message
                 if success:
-                    message = f"✅ Fractalic AI Server deployed successfully!\n\n"
-                    message += f"🌐 AI Server: {ai_server_info['url']}\n"
-                    message += f"📝 Execute script: {ai_server_info['sample_curl']}\n\n"
-                    message += f"🐳 Container: {config_dict['container_name']}\n"
-                    message += f"🛑 Stop: {ai_server_info['stop_command']}\n"
-                    message += f"🗑️ Remove: {ai_server_info['remove_command']}"
+                    message = f"🎉 Fractalic AI Server deployed successfully!\n\n"
+                    message += f"📋 AI Server Access:\n"
+                    message += f"   • Host: http://localhost:{ai_port}\n"
+                    message += f"   • Endpoint: /execute\n"
+                    message += f"   • Health Check: {ai_server_info['health_url']}\n"
+                    message += f"   • API Docs: {ai_server_info['docs_url']}\n\n"
+                    message += f"� Deployed Script:\n"
+                    message += f"   • File: {script_path}\n"
+                    message += f"   • Container: {config_dict['container_name']}\n\n"
+                    message += f"📝 Sample Usage:\n"
+                    message += f"   {ai_server_info['sample_curl']}\n\n"
+                    message += f"� Container Management:\n"
+                    message += f"   • View logs: {ai_server_info['logs_command']}\n"
+                    message += f"   • Stop: {ai_server_info['stop_command']}\n"
+                    message += f"   • Remove: {ai_server_info['remove_command']}"
                     if is_production:
-                        message += f"\n🔧 MCP Manager: http://localhost:5859/status"
+                        message += f"\n\n🔧 MCP Manager: http://localhost:5859/status (internal)"
                 else:
                     message = f"⚠️ Deployment completed with issues. {service_status}"
                 
@@ -616,7 +671,38 @@ class DockerRegistryPlugin(BasePublishPlugin):
                     url=ai_server_info["url"],
                     admin_url=None,
                     build_time=None,
-                    error=None if success else "Health check failed"
+                    error=None if success else "Health check failed",
+                    metadata={
+                        "ai_server": {
+                            "host": ai_server_info["url"],
+                            "port": ai_server_info["port"],
+                            "health_url": ai_server_info["health_url"],
+                            "docs_url": ai_server_info["docs_url"]
+                        },
+                        "deployment": {
+                            "script_name": config_dict["script_name"],
+                            "script_path": script_path,
+                            "container_name": config_dict["container_name"],
+                            "container_id": container_id[:12]
+                        },
+                        "api": {
+                            "endpoint": "/execute",
+                            "sample_curl": ai_server_info["sample_curl"],
+                            "example_payload": {
+                                "filename": script_path,
+                                "additional_context": "optional context"
+                            }
+                        },
+                        "container": {
+                            "logs_command": ai_server_info["logs_command"],
+                            "stop_command": ai_server_info["stop_command"],
+                            "remove_command": ai_server_info["remove_command"]
+                        },
+                        "services": {
+                            "ai_server": "healthy" if ai_server_info else "unhealthy",
+                            "mcp_manager": "healthy (internal)" if is_production else "healthy"
+                        }
+                    }
                 )
                 
         except Exception as e:
@@ -803,9 +889,12 @@ class DockerRegistryPlugin(BasePublishPlugin):
                         "docker", "cp", str(item), 
                         f"{container_name}:{payload_path}/"
                     ])
-                    self.logger.info(f"Copied directory {item.name} to container {payload_path}")
-                    copied_files.append(f"{item.name}/")
-                    file_count += 1
+                    
+                    # Count files in directory for accurate reporting
+                    dir_file_count = sum(1 for _ in item.rglob('*') if _.is_file())
+                    self.logger.info(f"Copied directory {item.name} to container {payload_path} ({dir_file_count} files inside)")
+                    copied_files.append(f"{item.name}/ ({dir_file_count} files)")
+                    file_count += dir_file_count
 
         if progress_callback:
             file_list = ", ".join(copied_files[:5])  # Show first 5 files
@@ -818,10 +907,54 @@ class DockerRegistryPlugin(BasePublishPlugin):
 
         # Copy configuration files from main directory to /fractalic
         main_config_files = ["mcp_servers.json", "settings.toml"]
-        current_dir = Path.cwd()
+        
+        # Determine the fractalic project root directory 
+        # Priority: 1) use source_path if it contains config files or is part of fractalic project
+        #          2) find fractalic.py from current directory up the tree
+        #          3) find fractalic.py from source_path up the tree
+        #          4) fallback to current working directory
+        project_root = None
+        
+        # First: try to find fractalic.py starting from source_path if provided
+        if hasattr(self, '_source_path') and self._source_path:
+            source_path = Path(self._source_path).resolve()
+            # Walk up from source_path to find fractalic.py (project root indicator)
+            for parent in [source_path] + list(source_path.parents):
+                if (parent / "fractalic.py").exists():
+                    project_root = parent
+                    self.logger.info(f"Found fractalic.py in source path hierarchy: {project_root}")
+                    break
+        
+        # Second: try to find fractalic.py starting from current working directory
+        if not project_root:
+            cwd = Path.cwd().resolve()
+            for parent in [cwd] + list(cwd.parents):
+                if (parent / "fractalic.py").exists():
+                    project_root = parent
+                    self.logger.info(f"Found fractalic.py from current directory: {project_root}")
+                    break
+        
+        # Third: try common locations where fractalic might be installed
+        if not project_root:
+            # Check if we're in a subdirectory of a fractalic installation
+            possible_paths = [
+                Path(__file__).parent.parent.parent,  # Go up from publisher/plugins/
+            ]
+            for path in possible_paths:
+                if (path / "fractalic.py").exists():
+                    project_root = path
+                    self.logger.info(f"Found fractalic.py via plugin path: {project_root}")
+                    break
+        
+        # Fallback to current working directory if nothing else works
+        if not project_root:
+            project_root = Path.cwd()
+            self.logger.warning(f"Could not locate fractalic.py, using current directory: {project_root}")
+            
+        self.logger.info(f"Using project root for config files: {project_root}")
         
         for config_file in main_config_files:
-            config_file_path = current_dir / config_file
+            config_file_path = project_root / config_file
             if config_file_path.exists():
                 self._run_command([
                     "docker", "cp", str(config_file_path), 

@@ -131,12 +131,17 @@ def deploy_application(plugin_manager: PluginManager, args):
     print()
     if result.success:
         print("✅ Deployment successful!")
-        print(f"🌐 URL: {result.url}")
-        if result.admin_url:
-            print(f"⚙️  Admin: {result.admin_url}")
-        if result.build_time:
-            print(f"⏱️  Build time: {result.build_time:.1f}s")
-        print(f"📝 Deployment ID: {result.deployment_id}")
+        # Display the detailed message from the plugin
+        if hasattr(result, 'message') and result.message:
+            print(result.message)
+        else:
+            # Fallback to basic info if no detailed message
+            print(f"🌐 URL: {result.url}")
+            if result.admin_url:
+                print(f"⚙️  Admin: {result.admin_url}")
+            if result.build_time:
+                print(f"⏱️  Build time: {result.build_time:.1f}s")
+            print(f"📝 Deployment ID: {result.deployment_id}")
     else:
         print("❌ Deployment failed!")
         print(f"Error: {result.error}")

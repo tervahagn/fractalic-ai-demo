@@ -147,16 +147,21 @@ def find_available_ai_server_port(preferred_port=8001):
     available_port = find_available_port(preferred_port + 1)
     return available_port, conflict_info
 
-def generate_ai_server_info(port, container_name=None):
+def generate_ai_server_info(port, container_name=None, script_path=None):
     """Generate AI server access information and sample commands."""
     base_url = f"http://localhost:{port}"
+    
+    # Use provided script path or default
+    default_script_path = "/payload/script.md"
+    if script_path:
+        default_script_path = script_path
     
     info = {
         'url': base_url,
         'health_url': f"{base_url}/health",
         'docs_url': f"{base_url}/docs",
         'execute_url': f"{base_url}/execute",
-        'sample_curl': f'curl -X POST {base_url}/execute -H "Content-Type: application/json" -d \'{{"filename": "/payload/script.md"}}\'',
+        'sample_curl': f'curl -X POST {base_url}/execute -H "Content-Type: application/json" -d \'{{"filename": "{default_script_path}"}}\'',
         'port': port
     }
     

@@ -32,6 +32,12 @@ class PluginManager:
     def _load_builtin_plugins(self):
         """Load built-in plugins that don't require separate plugin files"""
         try:
+            # Force reload of plugin modules in development to avoid caching issues
+            plugin_module_name = "publisher.plugins.docker_registry_plugin"
+            if plugin_module_name in sys.modules:
+                self.logger.info(f"Reloading cached plugin module: {plugin_module_name}")
+                importlib.reload(sys.modules[plugin_module_name])
+            
             # Load Docker Registry plugin
             from .plugins.docker_registry_plugin import DockerRegistryPlugin
             docker_plugin = DockerRegistryPlugin()
@@ -61,6 +67,8 @@ class PluginManager:
             
         except Exception as e:
             self.logger.error(f"Failed to load built-in plugins: {e}")
+            import traceback
+            traceback.print_exc()
     
     def discover_plugins(self) -> List[str]:
         """Discover all available plugins"""

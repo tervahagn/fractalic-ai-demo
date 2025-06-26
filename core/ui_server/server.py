@@ -857,14 +857,7 @@ def validate_docker_registry_request(data: Dict[str, Any]) -> Dict[str, str]:
     if not data.get("script_folder", "").strip():
         errors.append("script_folder is required") 
     
-    # Check image info (can come from multiple sources)
-    image_name = data.get("image_name", "").strip()
-    if not image_name:
-        errors.append("image_name is required")
-    
-    # Optional but recommended fields
-    if not data.get("image_tag", "").strip():
-        data["image_tag"] = "latest"  # Set default
+    # Note: image_name is hardcoded in backend, no validation needed
     
     return errors
 
@@ -898,14 +891,35 @@ async def deploy_docker_registry(request: Request):
         if not docker_plugin:
             raise HTTPException(status_code=500, detail="Docker registry plugin not available")
         
-        # Create publish request
-        publish_request = PublishRequest(
-            config=data,
-            metadata={"requested_at": time.time(), "deployment_id": deployment_id}
+        # Create deployment config from request data
+        from publisher.models import DeploymentConfig
+        
+        # Convert frontend request to DeploymentConfig
+        config = DeploymentConfig(
+            plugin_name="docker-registry",
+            script_name=data.get("script_name", ""),
+            script_folder=data.get("script_folder", ""),
+            container_name=data.get("container_name", f"fractalic-{deployment_id[:8]}"),
+            environment_vars=data.get("env_vars", {}),
+            port_mapping={},
+            custom_domain=None,
+            plugin_specific={
+                "image_name": "ghcr.io/fractalic-ai/fractalic:latest-production",  # Always use production image
+                "config_files": data.get("config_files", []),
+                "mount_paths": data.get("mount_paths", {})
+            }
         )
         
-        # Run deployment (blocking)
-        response = docker_plugin.publish(publish_request)
+        # Define progress callback for real-time updates
+        def progress_callback(message: str, progress: int):
+            print(f"[PROGRESS] {progress}% - {message}")
+        
+        # Run deployment (blocking) with correct interface
+        response = docker_plugin.publish(
+            source_path=data.get("script_folder", ""),
+            config=config,
+            progress_callback=progress_callback
+        )
         
         # Store deployment info if successful
         if response.success and response.deployment_id:
@@ -921,7 +935,7 @@ async def deploy_docker_registry(request: Request):
             "success": response.success,
             "message": response.message,
             "deployment_id": response.deployment_id,
-            "endpoint_url": response.endpoint_url,
+            "endpoint_url": response.url,  # Use 'url' field from PublishResult
             "metadata": response.metadata
         }
         
@@ -954,13 +968,13 @@ async def deploy_docker_registry_with_progress(request: Request):
         # Initialize progress tracking
         deployment_streams[deployment_id] = []
         
-        def progress_callback(message: str, stage: str, progress: int):
+        def progress_callback(message: str, progress: int):
             """Callback to track deployment progress"""
             progress_data = {
                 "deployment_id": deployment_id,
                 "timestamp": datetime.now().isoformat(),
                 "message": message,
-                "stage": stage,
+                "stage": "deploying",  # Default stage for now
                 "progress": progress
             }
             deployment_streams[deployment_id].append(progress_data)
@@ -980,17 +994,34 @@ async def deploy_docker_registry_with_progress(request: Request):
                     yield f"data: {json.dumps({'error': 'Docker registry plugin not available'})}\n\n"
                     return
                 
-                # Create publish request
-                publish_request = PublishRequest(
-                    config=data,
-                    metadata={"requested_at": time.time(), "deployment_id": deployment_id}
+                # Create deployment config from request data
+                from publisher.models import DeploymentConfig
+                
+                # Convert frontend request to DeploymentConfig
+                config = DeploymentConfig(
+                    plugin_name="docker-registry",
+                    script_name=data.get("script_name", ""),
+                    script_folder=data.get("script_folder", ""),
+                    container_name=data.get("container_name", f"fractalic-{deployment_id[:8]}"),
+                    environment_vars=data.get("env_vars", {}),
+                    port_mapping={},
+                    custom_domain=None,
+                    plugin_specific={
+                        "image_name": "ghcr.io/fractalic-ai/fractalic:latest-production",  # Always use production image
+                        "config_files": data.get("config_files", []),
+                        "mount_paths": data.get("mount_paths", {})
+                    }
                 )
                 
                 # Start deployment in background
                 loop = asyncio.get_event_loop()
                 
                 def run_deployment():
-                    return docker_plugin.publish(publish_request, progress_callback)
+                    return docker_plugin.publish(
+                        source_path=data.get("script_folder", ""),
+                        config=config,
+                        progress_callback=progress_callback
+                    )
                 
                 # Run deployment in thread pool to avoid blocking
                 deployment_future = loop.run_in_executor(None, run_deployment)
@@ -1025,7 +1056,7 @@ async def deploy_docker_registry_with_progress(request: Request):
                         "success": response.success,
                         "message": response.message,
                         "deployment_id": response.deployment_id,
-                        "endpoint_url": response.endpoint_url,
+                        "endpoint_url": response.url,  # Use 'url' field from PublishResult
                         "metadata": response.metadata
                     }
                 }
