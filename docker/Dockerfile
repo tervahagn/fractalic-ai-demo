@@ -11,12 +11,15 @@ RUN apt-get update && \
     git \
     apt-transport-https \
     ca-certificates \
-    software-properties-common && \
-    # Install Docker CLI for docker-in-docker functionality
-    curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add - && \
-    add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/debian $(lsb_release -cs) stable" && \
-    apt-get update && \
-    apt-get install -y docker-ce-cli && \
+    lsb-release && \
+    # Install Docker CLI using the official installation script
+    curl -fsSL https://get.docker.com -o get-docker.sh && \
+    sh get-docker.sh --dry-run && \
+    # Install just the Docker CLI (not the daemon)
+    curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-24.0.7.tgz -o docker.tgz && \
+    tar xzf docker.tgz && \
+    mv docker/docker /usr/local/bin/ && \
+    rm -rf docker docker.tgz get-docker.sh && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Node.js (version 20) and npm
@@ -58,6 +61,15 @@ WORKDIR /fractalic
 RUN mkdir -p /fractalic/logs /tmp && \
     chmod -R 777 /fractalic /fractalic-ui /tmp
 
+# Create initial mcp_servers.json if it doesn't exist (from sample)
+RUN if [ ! -f /fractalic/mcp_servers.json ] && [ -f /fractalic/mcp_servers.json.sample ]; then \
+        cp /fractalic/mcp_servers.json.sample /fractalic/mcp_servers.json; \
+        echo "📋 Created mcp_servers.json from sample"; \
+    elif [ ! -f /fractalic/mcp_servers.json ]; then \
+        echo '{"mcpServers": {}}' > /fractalic/mcp_servers.json; \
+        echo "📋 Created empty mcp_servers.json"; \
+    fi
+
 # Copy Supervisor configuration
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
@@ -73,15 +85,24 @@ echo "📍 Working directory: $(pwd)"\n\
 echo "👤 User: $(whoami) (UID: $(id -u))"\n\
 echo "🔓 Running with full root privileges (development mode)"\n\
 echo ""\n\
+echo "🐳 Docker CLI Status:"\n\
+if command -v docker >/dev/null 2>&1; then\n\
+    echo "  ✅ Docker CLI available: $(docker --version)"\n\
+else\n\
+    echo "  ❌ Docker CLI not found in PATH"\n\
+    echo "  PATH: $PATH"\n\
+fi\n\
+echo ""\n\
 echo "🌐 Service Ports:"\n\
 echo "  - Frontend (UI):     http://localhost:3000"\n\
 echo "  - Backend API:       http://localhost:8000"\n\
 echo "  - AI Server:         http://localhost:8001"\n\
-echo "  - MCP Manager:       http://localhost:5859"\n\
+echo "  - MCP Manager:       http://localhost:5859 (Direct startup)"\n\
 echo "  - Additional:        8002, 8003, 8004"\n\
 echo ""\n\
 echo "📝 Logs will be in /tmp/"\n\
-echo "🐳 Docker CLI available for deployment operations"\n\
+echo "� MCP Manager will start directly on port 5859"\n\
+echo "📁 mcp_servers.json will be created when servers are added"\n\
 echo ""\n\
 echo "Starting supervisord..."\n\
 exec supervisord -c /etc/supervisor/conf.d/supervisord.conf\n\
