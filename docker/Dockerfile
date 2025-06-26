@@ -16,9 +16,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user
-RUN useradd -m appuser
-
 # Copy backend code to /fractalic directory
 COPY fractalic/ /fractalic/
 
@@ -49,20 +46,17 @@ WORKDIR /fractalic
 # Skip npm run build - we use npm run dev in supervisord anyway
 # This makes Docker builds much faster since production build is unused
 
-# Create a logs directory and set ownership
-RUN mkdir -p /fractalic/logs && chown -R appuser:appuser /fractalic/logs
+# Create necessary directories with full permissions (development environment)
+RUN mkdir -p /fractalic/logs /tmp && \
+    chmod -R 777 /fractalic /fractalic-ui /tmp
 
 # Copy Supervisor configuration
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Change ownership of both application directories to appuser
-RUN chown -R appuser:appuser /fractalic /fractalic-ui
-
 # Set PYTHONPATH environment variable to fractalic directory
 ENV PYTHONPATH=/fractalic
 
-# Switch to the non-root user
-USER appuser
+# Stay as root user for development - full permissions to everything
 
 # Expose the necessary ports
 EXPOSE 8000 3000 8001 8002 8003 8004 5859
