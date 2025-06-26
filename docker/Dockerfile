@@ -1,14 +1,22 @@
 # Use the official Python slim image for a smaller footprint
 FROM python:3.11-slim
 
-# Install system dependencies, including git
+# Install system dependencies, including git and Docker CLI
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     gnupg \
     supervisor \
-    git && \
+    git \
+    apt-transport-https \
+    ca-certificates \
+    software-properties-common && \
+    # Install Docker CLI for docker-in-docker functionality
+    curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add - && \
+    add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/debian $(lsb_release -cs) stable" && \
+    apt-get update && \
+    apt-get install -y docker-ce-cli && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Node.js (version 20) and npm
@@ -58,8 +66,29 @@ ENV PYTHONPATH=/fractalic
 
 # Stay as root user for development - full permissions to everything
 
-# Expose the necessary ports
-EXPOSE 8000 3000 8001 8002 8003 8004 5859
+# Create an enhanced entrypoint script that shows port information
+RUN echo '#!/bin/bash\n\
+echo "🚀 Starting Fractalic Development Services..."\n\
+echo "📍 Working directory: $(pwd)"\n\
+echo "👤 User: $(whoami) (UID: $(id -u))"\n\
+echo "🔓 Running with full root privileges (development mode)"\n\
+echo ""\n\
+echo "🌐 Service Ports:"\n\
+echo "  - Frontend (UI):     http://localhost:3000"\n\
+echo "  - Backend API:       http://localhost:8000"\n\
+echo "  - AI Server:         http://localhost:8001"\n\
+echo "  - MCP Manager:       http://localhost:5859"\n\
+echo "  - Additional:        8002, 8003, 8004"\n\
+echo ""\n\
+echo "📝 Logs will be in /tmp/"\n\
+echo "🐳 Docker CLI available for deployment operations"\n\
+echo ""\n\
+echo "Starting supervisord..."\n\
+exec supervisord -c /etc/supervisor/conf.d/supervisord.conf\n\
+' > /fractalic/entrypoint.sh && chmod +x /fractalic/entrypoint.sh
 
-# Start Supervisor
-CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# Expose the necessary ports (explicitly list 5859 for MCP manager)
+EXPOSE 8000 3000 8001 5859 8002 8003 8004
+
+# Start with enhanced entrypoint script
+CMD ["/fractalic/entrypoint.sh"]
