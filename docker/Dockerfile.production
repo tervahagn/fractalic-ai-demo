@@ -19,9 +19,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user
-RUN useradd -m appuser
-
 # Copy backend code to /fractalic directory (matches local logic)
 COPY fractalic/ /fractalic/
 
@@ -52,10 +49,9 @@ WORKDIR /fractalic
 # Skip npm run build - we use npm run dev in supervisord anyway
 # This makes Docker builds much faster since production build is unused
 
-# Create necessary directories and set ownership
+# Create necessary directories with full root permissions
 RUN mkdir -p /fractalic/logs /fractalic/user-scripts /fractalic/user-config && \
-    chown -R appuser:appuser /fractalic /fractalic-ui && \
-    chmod -R 755 /fractalic/logs
+    chmod -R 777 /fractalic/logs
 
 # Copy Supervisor configuration
 COPY fractalic/docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
@@ -66,20 +62,19 @@ ENV PYTHONPATH=/fractalic
 # Set working directory
 WORKDIR /fractalic
 
-# Switch to the non-root user (matching local Dockerfile)
-USER appuser
-
-# Expose the necessary ports (matches local logic)
-EXPOSE 8000 3000 8001 8002 8003 8004 5859
-
-# Create an entrypoint script for proper initialization
+# Create an entrypoint script for proper initialization (running as root)
 RUN echo '#!/bin/bash\n\
-echo "Starting Fractalic services..."\n\
-echo "Working directory: $(pwd)"\n\
-echo "User: $(whoami)"\n\
-echo "Logs will be in /tmp/"\n\
+echo "🚀 Starting Fractalic services as ROOT user..."\n\
+echo "📍 Working directory: $(pwd)"\n\
+echo "👤 User: $(whoami) (UID: $(id -u))"\n\
+echo "🔓 Running with full root privileges"\n\
+echo "📝 Logs will be in /tmp/"\n\
+echo "🌐 Services will be available on multiple ports"\n\
 exec supervisord -c /etc/supervisor/conf.d/supervisord.conf\n\
 ' > /fractalic/entrypoint.sh && chmod +x /fractalic/entrypoint.sh
+
+# Expose all necessary ports (running as root allows binding to any port)
+EXPOSE 8000 3000 8001 8002 8003 8004 5859
 
 # Start with entrypoint script
 CMD ["/fractalic/entrypoint.sh"]
