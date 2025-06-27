@@ -102,11 +102,11 @@ echo "🌐 Service Ports:"\n\
 echo "  - Frontend (UI):     http://localhost:3000"\n\
 echo "  - Backend API:       http://localhost:8000"\n\
 echo "  - AI Server:         http://localhost:8001"\n\
-echo "  - MCP Manager:       http://localhost:5859 (Direct startup)"\n\
+echo "  - MCP Manager:       http://localhost:5859 (Start via UI)"\n\
 echo "  - Additional:        8002, 8003, 8004"\n\
 echo ""\n\
 echo "📝 Logs will be in /tmp/"\n\
-echo "� MCP Manager will start directly on port 5859"\n\
+echo "🎛️ MCP Manager: Start via UI when needed"\n\
 echo "📁 mcp_servers.json will be created when servers are added"\n\
 echo ""\n\
 echo "Starting supervisord..."\n\
