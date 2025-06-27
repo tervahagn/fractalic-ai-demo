@@ -23,7 +23,7 @@ jobs:
         build_type: [full, production]
         include:
           - build_type: full
-            dockerfile: ./fractalic/docker/Dockerfile.production
+            dockerfile: ./fractalic/docker/Dockerfile
             tags_suffix: ""
             needs_ui: true
           - build_type: production
