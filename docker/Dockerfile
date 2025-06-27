@@ -12,14 +12,19 @@ RUN apt-get update && \
     apt-transport-https \
     ca-certificates \
     lsb-release && \
-    # Install Docker CLI using the official installation script
-    curl -fsSL https://get.docker.com -o get-docker.sh && \
-    sh get-docker.sh --dry-run && \
-    # Install just the Docker CLI (not the daemon)
-    curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-24.0.7.tgz -o docker.tgz && \
+    # Install Docker CLI using architecture-specific static binary
+    ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "amd64" ]; then \
+        DOCKER_ARCH="x86_64"; \
+    elif [ "$ARCH" = "arm64" ]; then \
+        DOCKER_ARCH="aarch64"; \
+    else \
+        DOCKER_ARCH="x86_64"; \
+    fi && \
+    curl -fsSL https://download.docker.com/linux/static/stable/$DOCKER_ARCH/docker-24.0.7.tgz -o docker.tgz && \
     tar xzf docker.tgz && \
     mv docker/docker /usr/local/bin/ && \
-    rm -rf docker docker.tgz get-docker.sh && \
+    rm -rf docker docker.tgz && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Node.js (version 20) and npm
@@ -71,7 +76,7 @@ RUN if [ ! -f /fractalic/mcp_servers.json ] && [ -f /fractalic/mcp_servers.json.
     fi
 
 # Copy Supervisor configuration
-COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY fractalic/docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Set PYTHONPATH environment variable to fractalic directory
 ENV PYTHONPATH=/fractalic
