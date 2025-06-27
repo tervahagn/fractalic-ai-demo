@@ -54,7 +54,7 @@ COPY fractalic-ui/ /fractalic-ui/
 
 # Replace next.config.mjs with Docker-specific version for container networking
 # This MUST come after copying fractalic-ui/ to ensure it doesn't get overwritten
-COPY next.config.docker.mjs /fractalic-ui/next.config.mjs
+COPY fractalic/docker/next.config.docker.mjs /fractalic-ui/next.config.mjs
 
 # Set working directory to fractalic for backend operations
 WORKDIR /fractalic
