@@ -35,6 +35,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 # Copy backend code to /fractalic directory
 COPY fractalic/ /fractalic/
 
+# Fix MCP manager binding for Docker deployment (bind to all interfaces)
+RUN sed -i 's/127.0.0.1/0.0.0.0/g' /fractalic/fractalic_mcp_manager.py
+
 # Copy and install backend dependencies
 RUN pip install --no-cache-dir -r /fractalic/requirements.txt
 
