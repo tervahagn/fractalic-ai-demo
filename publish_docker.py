@@ -121,7 +121,7 @@ def generate_ai_server_info(port, container_name=None, script_path=None):
         'health_url': f"{base_url}/health",
         'docs_url': f"{base_url}/docs",
         'execute_url': f"{base_url}/execute",
-        'sample_curl': f'curl -X POST {base_url}/execute -H "Content-Type: application/json" -d \'{{"filename": "{default_script_path}"}}\'',
+        'sample_curl': f'curl -X POST {base_url}/execute -H "Content-Type: application/json" -d \'{{"filename": "{default_script_path}", "parameter_text": "optional context"}}\'',
         'port': port
     }
     

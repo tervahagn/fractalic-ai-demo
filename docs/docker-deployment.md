@@ -93,7 +93,7 @@ Example output:
 ✅ Fractalic AI Server deployed successfully!
 
 🌐 AI Server: http://localhost:8003
-📝 Execute script: curl -X POST http://localhost:8003/execute -H "Content-Type: application/json" -d '{"filename": "/payload/script.md"}'
+📝 Execute script: curl -X POST http://localhost:8003/execute -H "Content-Type: application/json" -d '{"filename": "/payload/script.md", "parameter_text": "optional context"}'
 ```
 
 ### Production vs Full Mode
@@ -498,7 +498,7 @@ POST http://localhost:8001/execute
 Content-Type: application/json
 {
   "filename": "/payload/my-script/script.md",
-  "additional_context": "optional context"
+  "parameter_text": "optional context"
 }
 
 # Provider Information

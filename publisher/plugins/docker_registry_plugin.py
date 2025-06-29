@@ -322,10 +322,18 @@ class DockerRegistryPlugin(BasePublishPlugin):
         
         if conflict_info:
             if progress_callback:
-                if conflict_info['type'] == 'docker_container':
-                    progress_callback(f"⚠️ Port {conflict_info['port']} in use by container {conflict_info['container']}, using port {ai_port}", 52)
+                if conflict_info.get('type') == 'docker_container':
+                    port = conflict_info.get('port', 'unknown')
+                    container = conflict_info.get('container', 'unknown')
+                    progress_callback(f"⚠️ Port {port} in use by container {container}, using port {ai_port}", 52)
+                elif conflict_info.get('type') == 'port_in_use':
+                    port = conflict_info.get('port', 'unknown')
+                    progress_callback(f"⚠️ Port {port} in use, using port {ai_port}", 52)
+                elif conflict_info.get('type') == 'preferred_port_unavailable':
+                    preferred_port = conflict_info.get('preferred_port', 'unknown')
+                    progress_callback(f"⚠️ Preferred port {preferred_port} unavailable, using port {ai_port}", 52)
                 else:
-                    progress_callback(f"⚠️ Port {conflict_info['port']} in use, using port {ai_port}", 52)
+                    progress_callback(f"⚠️ Port conflict detected, using port {ai_port}", 52)
         
         # Store the actual ports used
         config["actual_ports"] = {
@@ -692,7 +700,7 @@ class DockerRegistryPlugin(BasePublishPlugin):
                             "sample_curl": ai_server_info["sample_curl"],
                             "example_payload": {
                                 "filename": script_path,
-                                "additional_context": "optional context"
+                                "parameter_text": "optional context or parameters"
                             }
                         },
                         "container": {
