@@ -1,26 +1,12 @@
 {
   "mcpServers": {
-    "example-local-server": {
-      "url": "http://localhost:8765/mcp/example/sse"
-    },
-    "example-stdio-server": {
+    "memory-stdio-server": {
       "command": "npx",
       "args": [
         "-y",
         "@modelcontextprotocol/server-memory"
       ],
       "transport": "stdio"
-    },
-    "example-with-env": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@notionhq/notion-mcp-server"
-      ],
-      "env": {
-        "NOTION_TOKEN": "your-notion-token-here",
-        "NOTION_VERSION": "2022-06-28"
-      }
     }
   }
 }
