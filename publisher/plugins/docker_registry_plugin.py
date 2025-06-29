@@ -20,7 +20,9 @@ project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from core.utils import find_available_ai_server_port, generate_ai_server_info
+# Import publishing utilities
+sys.path.insert(0, os.path.dirname(project_root))  # Add parent to import publish_docker
+from publish_docker import find_available_ai_server_port, generate_ai_server_info
 from ..base_plugin import BasePublishPlugin
 from ..models import PublishRequest, PublishResponse, DeploymentStatus, PluginInfo, DeploymentInfo, PluginInfo, PluginCapability, DeploymentConfig, PublishResult, ProgressCallback
 

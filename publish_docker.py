@@ -44,7 +44,96 @@ import json
 import time
 
 # Import port detection utilities
-from core.utils import find_available_ai_server_port, generate_ai_server_info
+from core.utils import find_available_port, is_port_available, check_docker_container_on_port
+
+def find_available_ai_server_port(preferred_port=8001):
+    """
+    Find an available port for the AI server, checking for both system availability
+    and Docker container conflicts. Uses +10 stepping to avoid development port ranges.
+    
+    Returns:
+        tuple: (port, conflict_info) where conflict_info is None if no conflict,
+               or a dict with conflict details if a port was already in use.
+    """
+    conflict_info = None
+    max_attempts = 5
+    port_step = 10
+    
+    for attempt in range(max_attempts):
+        current_port = preferred_port + (attempt * port_step)
+        
+        # Check if current port is available
+        if is_port_available(port=current_port):
+            # Double-check for Docker container conflicts
+            container = check_docker_container_on_port(current_port)
+            if not container:
+                if attempt > 0:
+                    # Record that we had to step away from preferred port
+                    conflict_info = {
+                        'type': 'preferred_port_unavailable',
+                        'preferred_port': preferred_port,
+                        'attempts': attempt + 1,
+                        'step_size': port_step
+                    }
+                return current_port, conflict_info
+            else:
+                # Port available but Docker container conflict
+                if attempt == 0:
+                    conflict_info = {
+                        'type': 'docker_container',
+                        'port': current_port,
+                        'container': container
+                    }
+        else:
+            # Port not available
+            if attempt == 0:
+                conflict_info = {
+                    'type': 'port_in_use',
+                    'port': current_port
+                }
+    
+    # If all +10 stepped ports are busy, fall back to sequential search
+    fallback_start = preferred_port + (max_attempts * port_step)
+    available_port = find_available_port(fallback_start)
+    
+    # Update conflict info to indicate fallback was used
+    if not conflict_info:
+        conflict_info = {}
+    conflict_info.update({
+        'fallback_used': True,
+        'fallback_start': fallback_start,
+        'final_port': available_port
+    })
+    
+    return available_port, conflict_info
+
+def generate_ai_server_info(port, container_name=None, script_path=None):
+    """Generate AI server access information and sample commands."""
+    base_url = f"http://localhost:{port}"
+    
+    # Use provided script path or default
+    default_script_path = "/payload/script.md"
+    if script_path:
+        default_script_path = script_path
+    
+    info = {
+        'url': base_url,
+        'health_url': f"{base_url}/health",
+        'docs_url': f"{base_url}/docs",
+        'execute_url': f"{base_url}/execute",
+        'sample_curl': f'curl -X POST {base_url}/execute -H "Content-Type: application/json" -d \'{{"filename": "{default_script_path}"}}\'',
+        'port': port
+    }
+    
+    if container_name:
+        info.update({
+            'container_name': container_name,
+            'stop_command': f'docker stop {container_name}',
+            'remove_command': f'docker rm {container_name}',
+            'logs_command': f'docker logs {container_name}'
+        })
+    
+    return info
 
 class FractalicDockerPublisher:
     def __init__(self, container_name="fractalic-published", port_offset=0, mode="production"):
@@ -839,14 +928,21 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
             # Production mode: Only expose AI server externally with auto-detection
             self.log("Production mode: AI server only with auto-port detection", "BUILD")
             
-            # Find available port for AI server
+            # Find available port for AI server with +10 stepping
             ai_port, conflict_info = find_available_ai_server_port(8001)
             
             if conflict_info:
                 if conflict_info['type'] == 'docker_container':
                     self.log(f"Port {conflict_info['port']} occupied by container: {conflict_info['container']}", "WARNING")
-                else:
+                elif conflict_info['type'] == 'port_in_use':
                     self.log(f"Port {conflict_info['port']} already in use", "WARNING")
+                elif conflict_info['type'] == 'preferred_port_unavailable':
+                    self.log(f"Preferred port {conflict_info['preferred_port']} unavailable", "WARNING")
+                    self.log(f"Stepped +{conflict_info['step_size']} x {conflict_info['attempts']} attempts", "BUILD")
+                
+                if conflict_info.get('fallback_used'):
+                    self.log(f"Used fallback sequential search from port {conflict_info['fallback_start']}", "WARNING")
+                
                 self.log(f"Using alternative port: {ai_port}", "BUILD")
             else:
                 self.log(f"Using preferred AI server port: {ai_port}", "BUILD")
@@ -857,7 +953,7 @@ export function getApiUrl(service: keyof ApiConfig, config?: AppConfig | null): 
             
             # Only map AI server port externally
             port_args.extend(["-p", f"{ai_port}:8001"])
-            self.log(f"Port mapping: localhost:{ai_port} -> container:8001 (AI server)")
+            self.log(f"Port mapping: localhost:{ai_port} -> container:8001 (AI server)", "BUILD")
             
         else:
             # Full mode: Map all ports as before
